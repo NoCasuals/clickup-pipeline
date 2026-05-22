@@ -1,0 +1,218 @@
+import os
+import re  # <--- Added for project prefix regex verification
+import time
+import random
+import requests
+from datetime import datetime
+import gspread
+from google.oauth2.service_account import Credentials
+
+# --- CONFIGURATION ---
+CLICKUP_TOKEN = "pk_210179546_YROCQFW4CFTEVM4YHH982CQ2HI93G2JE"
+LIST_ID = "901701520995"  
+PROGRESSION_STATUS_FIELD_ID = "82d024f7-6f2f-4f5e-82b4-10146e18484e"
+GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1RE039NcnPeQtQrvI5zjLyADzAr-ZseBPUq388SxkV-Y/edit"
+
+def get_google_sheet_client():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file("creds.json", scopes=scopes)
+    return gspread.authorize(creds)
+
+def execute_with_retry(func, *args, **kwargs):
+    """Protects the pipeline from Google Write Quota limitations (429 errors)."""
+    max_retries = 5
+    base_delay = 5
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            if "429" in str(e) and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f" [!] Write quota limit hit (429). Retrying in {delay:.2f}s...")
+                time.sleep(delay)
+            else:
+                raise e
+        except Exception as e:
+            raise e
+
+def get_clickup_tasks():
+    """Streams all active tasks and subtasks out of ClickUp with real-time progress logging."""
+    all_tasks = []
+    page = 0
+    session = requests.Session()
+    session.headers.update({"Authorization": CLICKUP_TOKEN, "Content-Type": "application/json"})
+    
+    print("\n[ClickUp Data Stream Engine]")
+    while True:
+        print(f" -> Requesting page {page} from ClickUp API...")
+        url = f"https://api.clickup.com/api/v2/list/{LIST_ID}/task?subtasks=true&include_closed=false&limit=100&page={page}"
+        response = session.get(url, timeout=15)
+        
+        if response.status_code != 200:
+            print(f" [!] ClickUp Error: Failed to fetch tasks on page {page} (Status: {response.status_code})")
+            break
+            
+        data = response.json()
+        tasks = data.get("tasks", [])
+        
+        print(f"    -> Successfully retrieved {len(tasks)} tasks from page {page}.")
+        
+        if not tasks:
+            print(" -> Reached the end of the ClickUp task list.")
+            break
+            
+        all_tasks.extend(tasks)
+        page += 1
+        
+    print(f" -> Stream Complete. Total tasks pulled into memory: {len(all_tasks)}")
+    return all_tasks
+
+def main():
+    print(f"[{datetime.now()}] Initializing Status Synchronization Pipeline...")
+    tasks = get_clickup_tasks()
+    
+    # 1. Parse active tasks from ClickUp matching all status and naming criteria
+    active_first_markup_tasks = {}
+    
+    print("\n[Evaluating Filter Conditions]")
+    for task in tasks:
+        name = task.get("name", "").strip()
+        if not name:
+            continue
+            
+        # Condition A: Native ClickUp Status must equal TIMELINE
+        native_status = str(task.get("status", {}).get("status", "")).upper().strip()
+            
+        # Condition B: Progression Status Custom Field must equal FIRST MARKUP
+        progression_status = ""
+        for field in task.get("custom_fields", []):
+            if field.get("id") == PROGRESSION_STATUS_FIELD_ID:
+                val = field.get("value")
+                if val is not None:
+                    options = field.get("type_config", {}).get("options", [])
+                    if options:
+                        for opt in options:
+                            if str(opt.get("id")) == str(val) or str(opt.get("orderindex")) == str(val):
+                                progression_status = str(opt.get("name")).upper().strip()
+                                break
+                    if not progression_status:
+                        progression_status = str(val).upper().strip()
+                        
+        # Filtering Condition: Check native status, custom field status, AND the D###### project prefix
+        if progression_status == "FIRST MARKUP" and native_status == "TIMELINE" and re.match(r'^D\d{6}', name):
+            duration_val = ""
+            start_date_str = ""
+            start_date_ms = task.get("start_date")
+            due_date_ms = task.get("due_date")
+            
+            # Format and capture the ClickUp start date string
+            if start_date_ms:
+                try:
+                    start_date_obj = datetime.fromtimestamp(int(start_date_ms) / 1000).date()
+                    start_date_str = start_date_obj.strftime("%Y-%m-%d")
+                except Exception:
+                    pass
+            
+            # Calculate duration: (Due Date - Start Date)
+            if due_date_ms and start_date_ms:
+                try:
+                    due_date_obj = datetime.fromtimestamp(int(due_date_ms) / 1000).date()
+                    start_date_obj = datetime.fromtimestamp(int(start_date_ms) / 1000).date()
+                    duration_val = (due_date_obj - start_date_obj).days
+                except Exception:
+                    pass
+                    
+            active_first_markup_tasks[name] = {
+                "duration": duration_val,
+                "start_date": start_date_str
+            }
+
+    print(f" -> Found {len(active_first_markup_tasks)} items matching [Status: TIMELINE], [Progression: FIRST MARKUP], and [Naming Code: D######].")
+
+    # 2. Access your Master Log spreadsheet
+    print("\n[Connecting to Google Sheets]")
+    client = get_google_sheet_client()
+    log_sheet = client.open_by_url(GOOGLE_SHEET_URL).sheet1
+    all_sheet_rows = log_sheet.get_all_values()
+    print(" -> Connection Established. Sheet data cached.")
+
+    # 3. Structural Block Mapping Pass
+    parent_blocks = []
+    current_block = None
+    
+    for idx, cells in enumerate(all_sheet_rows):
+        row_num = idx + 1
+        if row_num == 1:  # Skip headers
+            continue
+            
+        col_a = cells[0].strip() if len(cells) > 0 else ""
+        col_b = cells[1].strip() if len(cells) > 1 else ""
+        
+        if col_b:  # Found a parent task row header
+            if current_block:
+                parent_blocks.append(current_block)
+            current_block = {"name": col_b, "parent_row": row_num, "all_rows": [row_num]}
+        elif current_block and not col_a and not col_b:
+            col_c = cells[2].strip() if len(cells) > 2 else ""
+            if col_c:
+                current_block["all_rows"].append(row_num)
+                
+    if current_block:
+        parent_blocks.append(current_block)
+
+    # 4. Synchronized Evaluation & Changes Phase
+    rows_to_delete = set()
+    matched_log_names = set()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    print("\n[Synchronizing Log Table Records]")
+    for block in parent_blocks:
+        task_name = block["name"]
+        p_row = block["parent_row"]
+        
+        if task_name in active_first_markup_tasks:
+            matched_log_names.add(task_name)
+            task_info = active_first_markup_tasks[task_name]
+            duration_str = str(task_info["duration"])
+            st_date_str = task_info["start_date"]
+            
+            # Action: Target Update -> Sync Date (Col A), Duration (Col G), and Start Date (Col K)
+            execute_with_retry(log_sheet.update_cell, p_row, 1, today_str)
+            execute_with_retry(log_sheet.update_cell, p_row, 7, duration_str)   # Column G
+            execute_with_retry(log_sheet.update_cell, p_row, 11, st_date_str)   # Column K
+            print(f" [≠] UPDATED: Synced row {p_row} metrics for tracking log item '{task_name}'.")
+        else:
+            # Action: Clean Deletion -> Queue the parent row and all child rows for removal
+            for r in block["all_rows"]:
+                rows_to_delete.add(r)
+            print(f" [×] REMOVAL DETECTED: Task '{task_name}' no longer matches criteria. Queued for extraction.")
+
+    # 5. Append Phase for Completely New Tasks
+    fresh_insertions = []
+    for task_name, task_info in active_first_markup_tasks.items():
+        if task_name not in matched_log_names:
+            duration_str = str(task_info["duration"])
+            st_date_str = task_info["start_date"]
+            
+            # Row Grid Layout Mapping Matrix:
+            # A: today_str | B: task_name | C: "" | D: "" | E: "" | F: "" | G: duration_str | H: "" | I: "" | J: "" | K: st_date_str
+            fresh_insertions.append([today_str, task_name, "", "", "", "", duration_str, "", "", "", st_date_str])
+            print(f" [✔] NEW RECORD DETECTED: Queued '{task_name}' for entry.")
+
+    if fresh_insertions:
+        print(f"\nAppending {len(fresh_insertions)} new rows to the Google Sheet tracker...")
+        execute_with_retry(log_sheet.append_rows, fresh_insertions, value_input_option="USER_ENTERED")
+        print(" -> Append Operations Successful.")
+
+    # 6. Deletion Execution Sweep (Reverse Processing to prevent shifting errors)
+    if rows_to_delete:
+        sorted_deletions = sorted(list(rows_to_delete), reverse=True)
+        print(f"\nExecuting cleanup sweep (Wiping {len(sorted_deletions)} obsolete rows out)...")
+        for target_row in sorted_deletions:
+            execute_with_retry(log_sheet.delete_rows, target_row)
+        print(" -> Cleanup Sweep Complete. Rows compressed cleanly.")
+
+    print("\nSUCCESS: Progression Sync Pipeline Complete.")
+
+if __name__ == "__main__":
+    main()
