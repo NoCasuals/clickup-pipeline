@@ -88,6 +88,34 @@ all_models = sorted(filtered_df['Model Name'].unique())
 selected_models = st.sidebar.multiselect("Filter by Specific Model:", options=all_models, default=[])
 final_df = filtered_df if not selected_models else filtered_df[filtered_df['Model Name'].isin(selected_models)]
 
+# --- 4.5 SECURE PASSWORD GATE ENGINE ---
+# Define a fallback in session state
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+# Check if the secret password is provided directly in the ClickUp URL parameter
+# e.g., ?pwd=your_secret_password
+url_password = st.query_params.get("pwd", "")
+secret_password = st.secrets.get("DASHBOARD_PASSWORD", "fallback_local_password")
+
+if url_password == secret_password:
+    st.session_state["authenticated"] = True
+
+# Execution Guard: If not authenticated, show a manual login box and stop execution
+if not st.session_state["authenticated"]:
+    st.title("🔒 Private Operational Dashboard")
+    user_input = st.text_input("Enter Access Password:", type="password")
+    
+    if user_input == secret_password:
+        st.session_state["authenticated"] = True
+        st.rerun()
+    else:
+        if user_input:
+            st.error("Invalid credentials.")
+        st.warning("This directory is restricted. Please authenticate or view via verified workspace hubs.")
+        st.stop() # Stops Streamlit from running or loading data below this line
+
+                
 # --- 5. DATA PROCESSING & VISUALIZATION ---
 
 if final_df.empty:
