@@ -80,11 +80,13 @@ def save_settings():
     if 'ui_yscale'   in st.session_state: st.session_state.saved_yscale   = st.session_state.ui_yscale
     if 'ui_projects' in st.session_state: st.session_state.saved_projects = st.session_state.ui_projects
     if 'ui_models'   in st.session_state: st.session_state.saved_models   = st.session_state.ui_models
+    if 'ui_ystretch' in st.session_state: st.session_state.saved_ystretch = st.session_state.ui_ystretch
 
 if 'saved_jitter'   not in st.session_state: st.session_state.saved_jitter   = False
 if 'saved_projects' not in st.session_state: st.session_state.saved_projects = []
 if 'saved_models'   not in st.session_state: st.session_state.saved_models   = []
 if 'saved_yscale'   not in st.session_state: st.session_state.saved_yscale   = "Linear"
+if 'saved_ystretch' not in st.session_state: st.session_state.saved_ystretch = 3.0
 
 # Legend mode: hidden by default so chart is compact; user can expand
 if 'legend_mode' not in st.session_state:
@@ -119,6 +121,20 @@ if st.session_state["sidebar_is_open"]:
             on_change=save_settings,
             help="Linear: fits to data range. Log: spreads clustered lines. From Zero: anchors axis at 0.",
         )
+        st.slider(
+            "↕️ Auto-Stretch Limit",
+            min_value=1.0,
+            max_value=8.0,
+            step=0.5,
+            value=float(st.session_state.saved_ystretch),
+            key="ui_ystretch",
+            on_change=save_settings,
+            help=(
+                "When many lines cluster together, the Y-axis is automatically expanded "
+                "to improve readability. This slider caps how far it can stretch "
+                "(1× = no stretch, 8× = maximum spread). Only applies in Linear mode."
+            ),
+        )
         st.markdown("---")
         st.subheader("🔍 Filters")
         all_projects = sorted(df['Project Code'].unique())
@@ -147,6 +163,52 @@ final_df    = filtered_df if not st.session_state.saved_models else filtered_df[
 
 # --- 7. LEGEND MODE HELPER ---
 LEGEND_OPTIONS = ["🚫 Hidden", "📁 By Project", "📋 All Models"]
+
+# --- 7b. DYNAMIC Y-AXIS RANGE HELPER ---
+def compute_dynamic_yrange(kpi_series, n_models, stretch_limit=3.0):
+    """
+    Auto-expands the y-axis when many model lines cluster together.
+
+    Logic:
+      - Crowd factor scales from 1.0 (1 model) up to stretch_limit (many models),
+        growing by 6% per additional model.
+      - The visible half-range = (data_range / 2) * crowd_factor.
+      - A 12% margin is added on each side on top of that.
+      - The result is capped at stretch_limit × natural data range.
+      - If all KPI values are positive the lower bound never goes below 0.
+      - Returns None when scale mode is Log or From Zero (those handle
+        their own ranging) or when the series is empty.
+    """
+    vals = kpi_series.dropna()
+    if vals.empty:
+        return None
+
+    data_min = float(vals.min())
+    data_max = float(vals.max())
+    data_range = data_max - data_min
+
+    # Degenerate case: all values identical
+    if data_range == 0:
+        pad = max(abs(data_min) * 0.5, 0.05)
+        return [data_min - pad, data_max + pad]
+
+    # Scale crowding factor: more models → more stretch, capped at stretch_limit
+    crowd_factor = min(1.0 + max(n_models - 1, 0) * 0.06, stretch_limit)
+
+    # Expanded half-range centered on the data midpoint
+    center = (data_min + data_max) / 2
+    half = (data_range / 2) * crowd_factor
+    margin = half * 0.24   # 12% padding each side
+
+    y_low  = center - half - margin
+    y_high = center + half + margin
+
+    # Never dip below zero when all values are non-negative
+    if data_min >= 0:
+        y_low = max(0.0, y_low)
+
+    return [y_low, y_high]
+
 
 def apply_legend(fig, mode, inside=True):
     """
@@ -305,13 +367,33 @@ with chart_col:
             _yscale = st.session_state.saved_yscale
             fig_models.update_yaxes(
                 automargin=True,
+                fixedrange=False,   # allows mouse drag / scroll-wheel zoom on Y axis
                 type="log" if _yscale == "Log" else "linear",
                 rangemode="tozero" if _yscale == "From Zero" else "normal",
                 zeroline=False,
             )
-            # Suppress ghost zero-line in rangeslider mini-chart
-            fig_models.update_layout(yaxis2=dict(showgrid=False, zeroline=False, showticklabels=False))
-            st.plotly_chart(fig_models, use_container_width=True)
+
+            # Dynamic auto-stretch: only in Linear mode (Log/FromZero manage their own range)
+            if _yscale == "Linear":
+                stretch_limit = float(st.session_state.saved_ystretch)
+                n_models_visible = len(final_df['Model Name'].unique())
+                dyn_range = compute_dynamic_yrange(final_df['Display KPI'], n_models_visible, stretch_limit)
+                if dyn_range:
+                    fig_models.update_yaxes(range=dyn_range)
+
+            # Ghost-line fix: hide the rangeslider's internal y-axis entirely
+            fig_models.update_layout(
+                yaxis2=dict(
+                    visible=False,
+                    fixedrange=True,
+                    showgrid=False,
+                    zeroline=False,
+                    showticklabels=False,
+                    rangemode="match",
+                )
+            )
+            st.plotly_chart(fig_models, use_container_width=True,
+                            config={"scrollZoom": True})
 
             if view_mode == "all":
                 st.markdown("---")
@@ -353,10 +435,29 @@ with chart_col:
             _yscale = st.session_state.saved_yscale
             fig_sum.update_yaxes(
                 automargin=True,
+                fixedrange=False,   # allows mouse drag / scroll-wheel zoom on Y axis
                 type="log" if _yscale == "Log" else "linear",
                 rangemode="tozero" if _yscale == "From Zero" else "normal",
                 zeroline=False,
             )
-            # Suppress ghost zero-line artifact in rangeslider
-            fig_sum.update_layout(yaxis2=dict(showgrid=False, zeroline=False, showticklabels=False))
-            st.plotly_chart(fig_sum, use_container_width=True)
+
+            # Dynamic auto-stretch for summation chart (treat as single "model")
+            if _yscale == "Linear":
+                stretch_limit = float(st.session_state.saved_ystretch)
+                dyn_range_sum = compute_dynamic_yrange(sum_df['KPI'], n_models=1, stretch_limit=stretch_limit)
+                if dyn_range_sum:
+                    fig_sum.update_yaxes(range=dyn_range_sum)
+
+            # Ghost-line fix: fully hide the rangeslider's internal secondary y-axis
+            fig_sum.update_layout(
+                yaxis2=dict(
+                    visible=False,
+                    fixedrange=True,
+                    showgrid=False,
+                    zeroline=False,
+                    showticklabels=False,
+                    rangemode="match",
+                )
+            )
+            st.plotly_chart(fig_sum, use_container_width=True,
+                            config={"scrollZoom": True})
