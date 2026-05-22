@@ -154,21 +154,6 @@ final_df = final_df[pd.to_datetime(final_df['Date']).dt.dayofweek < 5].copy()
 LEGEND_OPTIONS = ["🚫 Hidden", "📁 By Project", "📋 All Models"]
 
 def apply_legend(fig, mode, inside=True):
-    """
-    Configure legend visibility and grouping on a Plotly figure.
-
-    Modes:
-      🚫 Hidden    – showlegend=False, no overhead
-      📁 By Project – one legend entry per D###### project code; clicking
-                      toggles all models in that project simultaneously.
-                      Individual model names are still visible on hover.
-      📋 All Models – every model listed, grouped under project headers
-                      with collapsible group titles.
-
-    When inside=True the legend floats as a semi-transparent overlay in
-    the top-right corner of the plot area with a scrollable maxheight,
-    so it never pushes the chart wider or taller.
-    """
     if mode == "🚫 Hidden":
         fig.update_layout(showlegend=False)
         return
@@ -192,8 +177,7 @@ def apply_legend(fig, mode, inside=True):
     )
 
     fig.update_layout(showlegend=True, legend=legend_cfg)
-
-    seen_projects = {}  # project_code -> first trace index
+    seen_projects = {}
 
     for trace in fig.data:
         match = re.match(r'(D\d{6})', trace.name)
@@ -203,7 +187,6 @@ def apply_legend(fig, mode, inside=True):
             trace.legendgroup = p_code
             if p_code not in seen_projects:
                 seen_projects[p_code] = True
-                # Show only ONE entry per project; label it as the project code
                 trace.showlegend = True
                 trace.name = f"📁 {p_code}"
             else:
@@ -217,22 +200,36 @@ def apply_legend(fig, mode, inside=True):
 
 # --- 8. VISUALIZATION ---
 view_mode = st.query_params.get("view", "all").lower()
-today = datetime.date.today()   # used to extend the x-axis through the current day
+today = datetime.date.today()
 
 with chart_col:
     if final_df.empty:
         st.warning("No data available for the selected filters.")
     else:
+        # --- DYNAMIC 3-MONTH DATE WINDOW LOGIC ---
+        max_date_ts = pd.to_datetime(final_df['Date']).max()
+        max_date = today if pd.isna(max_date_ts) else max_date_ts.date()
+
+        right_bound_if_centered = today + datetime.timedelta(days=45)
+        
+        if right_bound_if_centered < max_date:
+            # The 3-month window centered on today doesn't reach the end of the data
+            x_start = today - datetime.timedelta(days=45)
+            x_end = today + datetime.timedelta(days=45)
+        else:
+            # The data ends sooner, anchor strictly to the end of the graph + 1 day to prevent cutoff
+            x_end = max_date + datetime.timedelta(days=1)
+            x_start = x_end - datetime.timedelta(days=90)
+
 
         # ── CHART 1: INDIVIDUAL MODELS ────────────────────────────────────
         if view_mode in ["all", "models"]:
 
-            # Legend mode selector lives above the chart title, aligned right
             title_col, legend_ctl_col = st.columns([3, 2])
             with title_col:
                 st.title("KPI per Model Over Time")
             with legend_ctl_col:
-                st.write("")   # small vertical nudge
+                st.write("")
                 chosen = st.radio(
                     "Legend",
                     options=LEGEND_OPTIONS,
@@ -245,14 +242,11 @@ with chart_col:
 
             unique_model_count = len(final_df['Model Name'].unique())
 
-            # Height: no longer inflated to match a tall external legend
-            # Hidden → compact; visible → give a bit more room but still bounded
             if st.session_state.legend_mode == "🚫 Hidden":
                 calculated_height = max(480, unique_model_count * 7 + 200)
             else:
                 calculated_height = max(560, unique_model_count * 10 + 220)
 
-            # Jitter: offset scales with data range so it's always visible
             final_df = final_df.copy()
             final_df['Display KPI'] = final_df['KPI']
             if st.session_state.saved_jitter:
@@ -296,19 +290,17 @@ with chart_col:
                 hoverlabel=dict(font_size=16, font_family="Arial", align="left"),
             )
 
-            # Apply legend mode (grouped / full / hidden)
             apply_legend(fig_models, st.session_state.legend_mode, inside=True)
 
-            # Let Plotly handle dynamic date ticking natively
+            # Updated dynamic axes mapping using nticks logic
             fig_models.update_xaxes(
                 type="date",
-                tickmode="auto",           # Restores dynamic label spacing on zoom
-                tickformat="%b %d",        # Clean 'Month Day' formatting
-                nticks=35,                 # Encourages Plotly to pack in daily ticks if screen space allows
+                tickmode="auto",           
+                tickformat="%b %d",        
+                nticks=90,                 
                 tickangle=-40,
                 automargin=True,
-                # Narrow the default viewport slightly so Plotly has enough physical pixels to render daily ticks natively
-                range=[today - datetime.timedelta(days=15), today + datetime.timedelta(days=15)],
+                range=[x_start, x_end],
                 rangeslider=dict(visible=True, thickness=0.04, yaxis=dict(rangemode="match")),
             )
             
@@ -351,15 +343,15 @@ with chart_col:
                 hoverlabel=dict(font_size=16, font_family="Arial", align="left"),
             )
             
-            # Let Plotly handle dynamic date ticking natively
+            # Updated dynamic axes mapping using nticks logic
             fig_sum.update_xaxes(
                 type="date",
                 tickmode="auto",
                 tickformat="%b %d",
-                nticks=35,
+                nticks=90,
                 tickangle=-40,
                 automargin=True,
-                range=[today - datetime.timedelta(days=15), today + datetime.timedelta(days=15)],
+                range=[x_start, x_end],
                 rangeslider=dict(visible=False),
             )
             
