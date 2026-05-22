@@ -300,7 +300,7 @@ with chart_col:
                 tickformat="%b %d, %Y",
                 tickangle=-40,
                 tickmode="auto",
-                nticks=28,
+                nticks=40,
                 automargin=True,
                 range=[final_df["Date"].min(), max(final_df["Date"].max(), today)],
                 rangeslider=dict(visible=True, thickness=0.04, yaxis=dict(rangemode="match")),
