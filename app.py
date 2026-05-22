@@ -80,13 +80,11 @@ def save_settings():
     if 'ui_yscale'   in st.session_state: st.session_state.saved_yscale   = st.session_state.ui_yscale
     if 'ui_projects' in st.session_state: st.session_state.saved_projects = st.session_state.ui_projects
     if 'ui_models'   in st.session_state: st.session_state.saved_models   = st.session_state.ui_models
-    if 'ui_ystretch' in st.session_state: st.session_state.saved_ystretch = st.session_state.ui_ystretch
 
 if 'saved_jitter'   not in st.session_state: st.session_state.saved_jitter   = False
 if 'saved_projects' not in st.session_state: st.session_state.saved_projects = []
 if 'saved_models'   not in st.session_state: st.session_state.saved_models   = []
 if 'saved_yscale'   not in st.session_state: st.session_state.saved_yscale   = "Linear"
-if 'saved_ystretch' not in st.session_state: st.session_state.saved_ystretch = 5.0
 
 # Legend mode: hidden by default so chart is compact; user can expand
 if 'legend_mode' not in st.session_state:
@@ -121,21 +119,6 @@ if st.session_state["sidebar_is_open"]:
             on_change=save_settings,
             help="Linear: fits to data range. Log: spreads clustered lines. From Zero: anchors axis at 0.",
         )
-        st.slider(
-            "📏 Chart Height Limit",
-            min_value=1.0,
-            max_value=8.0,
-            step=0.5,
-            value=float(st.session_state.saved_ystretch),
-            key="ui_ystretch",
-            on_change=save_settings,
-            help=(
-                "Controls how tall the models chart can grow as more lines are added. "
-                "1× caps at ~500 px; 8× allows up to ~4 000 px. "
-                "A taller chart gives more vertical pixels per KPI unit, "
-                "visually separating clustered lines."
-            ),
-        )
         st.markdown("---")
         st.subheader("🔍 Filters")
         all_projects = sorted(df['Project Code'].unique())
@@ -162,43 +145,8 @@ else:
 filtered_df = df if not st.session_state.saved_projects else df[df['Project Code'].isin(st.session_state.saved_projects)]
 final_df    = filtered_df if not st.session_state.saved_models else filtered_df[filtered_df['Model Name'].isin(st.session_state.saved_models)]
 
-# Reset Y-range sliders whenever the active filter set changes so the defaults
-# recalculate from the new data instead of keeping a stale position.
-_filter_sig = str(st.session_state.saved_projects) + str(st.session_state.saved_models)
-if st.session_state.get('_last_filter_sig') != _filter_sig:
-    st.session_state['_last_filter_sig'] = _filter_sig
-    for _k in ('y_range_slider_models', 'y_range_slider_sum'):
-        if _k in st.session_state:
-            del st.session_state[_k]
-
 # --- 7. LEGEND MODE HELPER ---
 LEGEND_OPTIONS = ["🚫 Hidden", "📁 By Project", "📋 All Models"]
-
-# --- 7b. CHART HEIGHT HELPER ---
-def compute_chart_height(n_models, stretch_limit, legend_visible):
-    """
-    Grows chart height with model count so each line gets more vertical pixels.
-    stretch_limit (1–8) controls the ceiling: 1× → 500 px, 8× → 4 000 px.
-    """
-    max_h   = int(stretch_limit * 500)          # 500 px … 4 000 px
-    per_model = 30 if legend_visible else 22
-    target  = 300 + n_models * per_model
-    return max(480, min(target, max_h))
-
-
-# --- 7c. AUTO Y-RANGE HELPER ---
-def compute_auto_yrange(kpi_series):
-    """
-    Tight fit around the data with ~8 % padding each side.
-    Used as the initial default for the Y-range slider.
-    """
-    vals = kpi_series.dropna()
-    if vals.empty:
-        return [0.0, 1.0]
-    lo, hi = float(vals.min()), float(vals.max())
-    pad = max((hi - lo) * 0.08, abs(hi) * 0.02, 1e-6)
-    return [max(0.0, lo - pad), hi + pad]
-
 
 def apply_legend(fig, mode, inside=True):
     """
@@ -290,14 +238,13 @@ with chart_col:
                 st.session_state.legend_mode = chosen
 
             unique_model_count = len(final_df['Model Name'].unique())
-            _legend_vis = st.session_state.legend_mode != "🚫 Hidden"
 
-            # Height grows with model count so lines get more vertical pixels
-            calculated_height = compute_chart_height(
-                unique_model_count,
-                float(st.session_state.saved_ystretch),
-                _legend_vis
-            )
+            # Height: no longer inflated to match a tall external legend
+            # Hidden → compact; visible → give a bit more room but still bounded
+            if st.session_state.legend_mode == "🚫 Hidden":
+                calculated_height = max(480, unique_model_count * 7 + 200)
+            else:
+                calculated_height = max(560, unique_model_count * 10 + 220)
 
             # Jitter: offset scales with data range so it's always visible
             final_df = final_df.copy()
@@ -309,28 +256,6 @@ with chart_col:
                     final_df["KPI"]
                     + final_df.groupby(["Date", "KPI"]).cumcount() * jitter_scale
                 )
-
-            # ── Y-AXIS RANGE SLIDER ──────────────────────────────────────────
-            # Explicit two-handle slider so the user can stretch/compress the Y
-            # axis the same way the X rangeslider works below the chart.
-            _auto_yr   = compute_auto_yrange(final_df['Display KPI'])
-            _y_max_cap = max(round(float(final_df['Display KPI'].max()) * 3.0, 5),
-                             _auto_yr[1] * 1.5)
-            _y_step    = max(0.000001, round(_y_max_cap / 2000, 7))
-            _yscale    = st.session_state.saved_yscale
-
-            if _yscale == "Linear":
-                y_range_models = st.slider(
-                    "↕️ Y-Axis Range",
-                    min_value=0.0,
-                    max_value=float(_y_max_cap),
-                    value=(float(_auto_yr[0]), float(_auto_yr[1])),
-                    step=float(_y_step),
-                    format="%.5f",
-                    key="y_range_slider_models",
-                    help="Drag either handle to zoom the Y-axis in or out.",
-                )
-            # ────────────────────────────────────────────────────────────────
 
             fig_models = px.line(
                 final_df,
@@ -375,23 +300,16 @@ with chart_col:
                 tickmode="auto",
                 nticks=14,
                 automargin=True,
-                # yaxis=dict(rangemode="match") tells the mini rangeslider chart
-                # to mirror the main y-axis scale, eliminating the ghost line.
-                rangeslider=dict(visible=True, thickness=0.04,
-                                 yaxis=dict(rangemode="match")),
+                rangeslider=dict(visible=True, thickness=0.04, yaxis=dict(rangemode="match")),
             )
+            _yscale = st.session_state.saved_yscale
             fig_models.update_yaxes(
                 automargin=True,
-                fixedrange=False,
                 type="log" if _yscale == "Log" else "linear",
                 rangemode="tozero" if _yscale == "From Zero" else "normal",
                 zeroline=False,
             )
-            if _yscale == "Linear":
-                fig_models.update_yaxes(range=list(y_range_models))
-
-            st.plotly_chart(fig_models, use_container_width=True,
-                            config={"scrollZoom": True})
+            st.plotly_chart(fig_models, use_container_width=True)
 
             if view_mode == "all":
                 st.markdown("---")
@@ -400,27 +318,6 @@ with chart_col:
         if view_mode in ["all", "summation"]:
             st.title("KPI Summation")
             sum_df  = final_df.groupby("Date", as_index=False)["KPI"].sum()
-
-            # ── Y-AXIS RANGE SLIDER ──────────────────────────────────────────
-            _yscale      = st.session_state.saved_yscale
-            _auto_yr_sum = compute_auto_yrange(sum_df['KPI'])
-            _y_max_sum   = max(round(float(sum_df['KPI'].max()) * 3.0, 5),
-                               _auto_yr_sum[1] * 1.5)
-            _y_step_sum  = max(0.000001, round(_y_max_sum / 2000, 7))
-
-            if _yscale == "Linear":
-                y_range_sum = st.slider(
-                    "↕️ Y-Axis Range",
-                    min_value=0.0,
-                    max_value=float(_y_max_sum),
-                    value=(float(_auto_yr_sum[0]), float(_auto_yr_sum[1])),
-                    step=float(_y_step_sum),
-                    format="%.5f",
-                    key="y_range_slider_sum",
-                    help="Drag either handle to zoom the Y-axis in or out.",
-                )
-            # ────────────────────────────────────────────────────────────────
-
             fig_sum = px.line(sum_df, x="Date", y="KPI", markers=True, height=500)
             fig_sum.update_traces(
                 hovertemplate=(
@@ -449,18 +346,13 @@ with chart_col:
                 tickmode="auto",
                 nticks=14,
                 automargin=True,
-                rangeslider=dict(visible=True, thickness=0.04,
-                                 yaxis=dict(rangemode="match")),
+                rangeslider=dict(visible=True, thickness=0.04, yaxis=dict(rangemode="match")),
             )
+            _yscale = st.session_state.saved_yscale
             fig_sum.update_yaxes(
                 automargin=True,
-                fixedrange=False,
                 type="log" if _yscale == "Log" else "linear",
                 rangemode="tozero" if _yscale == "From Zero" else "normal",
                 zeroline=False,
             )
-            if _yscale == "Linear":
-                fig_sum.update_yaxes(range=list(y_range_sum))
-
-            st.plotly_chart(fig_sum, use_container_width=True,
-                            config={"scrollZoom": True})
+            st.plotly_chart(fig_sum, use_container_width=True)
