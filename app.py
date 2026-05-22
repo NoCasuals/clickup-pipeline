@@ -104,7 +104,7 @@ else:
 if st.session_state["sidebar_is_open"]:
     settings_col, chart_col = st.columns([1, 4], gap="large")
     with settings_col:
-        st.header("📊 Dashboard Settings")
+        st.header("Graph Settings")
         st.checkbox("⚡ Separate Overlapping Points", value=st.session_state.saved_jitter, key="ui_jitter", on_change=save_settings)
         st.checkbox("📁 Group Legend by Project Code", value=st.session_state.saved_group, key="ui_group", on_change=save_settings)
 
