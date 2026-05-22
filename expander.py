@@ -496,7 +496,8 @@ def main():
                         seen_models_this_pass.add(model_output.upper())
                         project_sheet_updates.append({
                             "model_name": f"{project_code} - {model_output}",
-                            "loading_quotient": loading_quotient
+                            "loading_quotient": loading_quotient,
+                            "clickup_start_date": parent_col_k_str
                         })
                     
                     model_lookup_key = re.sub(r'[^A-Z0-9]', '', model_output.upper())
@@ -593,6 +594,7 @@ def main():
                     for p_update in project_sheet_updates:
                         full_name = p_update["model_name"]
                         lq_val = str(p_update["loading_quotient"])
+                        clickup_start_str = p_update.get("clickup_start_date", "")
                         
                         same_day_row_idx = None
                         for r_idx, r_cells in enumerate(proj_rows):
@@ -612,6 +614,47 @@ def main():
                         else:
                             # Rule: New row logs for non-existing configurations or fresh execution periods
                             rows_to_insert_at_top.append([full_name, today_str, lq_val])
+                        
+                        # --- BACKFILL PHASE: Gap-fill missing days between ClickUp start and earliest sheet 2 entry ---
+                        clickup_start_dt = clean_and_parse_date(clickup_start_str)
+                        if clickup_start_dt:
+                            # Collect all existing dates recorded for this model in sheet 2
+                            existing_model_dates = []
+                            existing_model_date_strs = set()
+                            for r_idx, r_cells in enumerate(proj_rows):
+                                if r_idx == 0:
+                                    continue
+                                if len(r_cells) > 0 and r_cells[0].strip().upper() == full_name.upper():
+                                    if len(r_cells) > 1 and r_cells[1].strip():
+                                        parsed_d = clean_and_parse_date(r_cells[1].strip())
+                                        if parsed_d:
+                                            existing_model_dates.append(parsed_d)
+                                            existing_model_date_strs.add(r_cells[1].strip())
+                            
+                            if existing_model_dates:
+                                earliest_existing = min(existing_model_dates)
+                                latest_existing = max(existing_model_dates)
+                                
+                                # Only backfill when the ClickUp start date predates the first recorded entry
+                                if earliest_existing > clickup_start_dt:
+                                    backfill_rows = []
+                                    current_day = clickup_start_dt
+                                    while current_day <= latest_existing:
+                                        day_str = current_day.strftime("%Y-%m-%d")
+                                        # Skip days that already have an entry for this model
+                                        if day_str not in existing_model_date_strs:
+                                            backfill_rows.append([full_name, day_str, lq_val])
+                                        current_day += timedelta(days=1)
+                                    
+                                    if backfill_rows:
+                                        execute_with_retry(
+                                            proj_sheet.insert_rows,
+                                            backfill_rows,
+                                            row=2,
+                                            value_input_option="USER_ENTERED"
+                                        )
+                                        print(f" [+] BACKFILL INJECTION: Inserted {len(backfill_rows)} gap rows for '{full_name}' "
+                                              f"spanning {clickup_start_dt} → {latest_existing}.")
                     
                     if rows_to_insert_at_top:
                         # Append always shifts downward directly below line 1 tags (into Row 2)
