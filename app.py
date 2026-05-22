@@ -84,7 +84,7 @@ def save_settings():
 if 'saved_jitter'   not in st.session_state: st.session_state.saved_jitter   = False
 if 'saved_projects' not in st.session_state: st.session_state.saved_projects = []
 if 'saved_models'   not in st.session_state: st.session_state.saved_models   = []
-if 'saved_yscale'   not in st.session_state: st.session_state.saved_yscale   = "Auto-Fit"
+if 'saved_yscale'   not in st.session_state: st.session_state.saved_yscale   = "Linear"
 
 # Legend mode: hidden by default so chart is compact; user can expand
 if 'legend_mode' not in st.session_state:
@@ -113,11 +113,11 @@ if st.session_state["sidebar_is_open"]:
         )
         st.radio(
             "📐 Y-Axis Scale",
-            options=["Auto-Fit", "From Zero"],
-            index=["Auto-Fit", "From Zero"].index(st.session_state.saved_yscale),
+            options=["Linear", "Log", "From Zero"],
+            index=["Linear", "Log", "From Zero"].index(st.session_state.saved_yscale if st.session_state.saved_yscale in ["Linear", "Log", "From Zero"] else "Linear"),
             key="ui_yscale",
             on_change=save_settings,
-            help="Auto-Fit zooms into the data range. From Zero anchors the axis at 0.",
+            help="Linear: fits to data range. Log: spreads clustered lines. From Zero: anchors axis at 0.",
         )
         st.markdown("---")
         st.subheader("🔍 Filters")
@@ -302,9 +302,11 @@ with chart_col:
                 automargin=True,
                 rangeslider=dict(visible=True, thickness=0.04),
             )
+            _yscale = st.session_state.saved_yscale
             fig_models.update_yaxes(
                 automargin=True,
-                rangemode="normal" if st.session_state.saved_yscale == "Auto-Fit" else "tozero",
+                type="log" if _yscale == "Log" else "linear",
+                rangemode="tozero" if _yscale == "From Zero" else "normal",
                 zeroline=False,
             )
             # Suppress ghost zero-line in rangeslider mini-chart
@@ -348,9 +350,11 @@ with chart_col:
                 automargin=True,
                 rangeslider=dict(visible=True, thickness=0.04),
             )
+            _yscale = st.session_state.saved_yscale
             fig_sum.update_yaxes(
                 automargin=True,
-                rangemode="normal" if st.session_state.saved_yscale == "Auto-Fit" else "tozero",
+                type="log" if _yscale == "Log" else "linear",
+                rangemode="tozero" if _yscale == "From Zero" else "normal",
                 zeroline=False,
             )
             # Suppress ghost zero-line artifact in rangeslider
