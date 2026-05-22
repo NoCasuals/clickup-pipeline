@@ -77,6 +77,7 @@ if "sidebar_is_open" not in st.session_state:
 
 def save_settings():
     if 'ui_jitter'   in st.session_state: st.session_state.saved_jitter   = st.session_state.ui_jitter
+    if 'ui_yscale'   in st.session_state: st.session_state.saved_yscale   = st.session_state.ui_yscale
     if 'ui_projects' in st.session_state: st.session_state.saved_projects = st.session_state.ui_projects
     if 'ui_models'   in st.session_state: st.session_state.saved_models   = st.session_state.ui_models
 
@@ -84,6 +85,7 @@ if 'saved_jitter' not in st.session_state:
     st.session_state.saved_jitter   = False
     st.session_state.saved_projects = []
     st.session_state.saved_models   = []
+    st.session_state.saved_yscale   = "Auto-Fit"
 
 # Legend mode: hidden by default so chart is compact; user can expand
 if 'legend_mode' not in st.session_state:
@@ -109,6 +111,14 @@ if st.session_state["sidebar_is_open"]:
             value=st.session_state.saved_jitter,
             key="ui_jitter",
             on_change=save_settings
+        )
+        st.radio(
+            "📐 Y-Axis Scale",
+            options=["Auto-Fit", "From Zero"],
+            index=["Auto-Fit", "From Zero"].index(st.session_state.saved_yscale),
+            key="ui_yscale",
+            on_change=save_settings,
+            help="Auto-Fit zooms into the data range. From Zero anchors the axis at 0.",
         )
         st.markdown("---")
         st.subheader("🔍 Filters")
@@ -161,18 +171,18 @@ def apply_legend(fig, mode, inside=True):
 
     # Shared overlay legend style (inside plot, scrollable)
     legend_cfg = dict(
-        x=0.99, y=0.99,
-        xanchor="right", yanchor="top",
+        x=0.01, y=0.99,
+        xanchor="left", yanchor="top",
         bgcolor="rgba(20,20,20,0.82)",
         bordercolor="rgba(180,180,180,0.35)",
         borderwidth=1,
-        font=dict(size=10),
+        font=dict(size=13),
         tracegroupgap=3,
         itemsizing="constant",
         maxheight=420,          # enables scroll when list overflows
     ) if inside else dict(
-        yanchor="top", y=0.99, xanchor="left", x=1.01,
-        font=dict(size=10),
+        yanchor="top", y=0.99, xanchor="left", x=0.01,
+        font=dict(size=13),
         tracegroupgap=3,
         itemsizing="constant",
     )
@@ -197,7 +207,7 @@ def apply_legend(fig, mode, inside=True):
 
         elif mode == "📋 All Models":
             trace.legendgroup = p_code
-            trace.legendgrouptitle = dict(text=f"📁 {p_code}", font=dict(size=11))
+            trace.legendgrouptitle = dict(text=f"📁 {p_code}", font=dict(size=13))
             trace.showlegend = True
 
 
@@ -293,7 +303,13 @@ with chart_col:
                 automargin=True,
                 rangeslider=dict(visible=True, thickness=0.04),
             )
-            fig_models.update_yaxes(automargin=True)
+            fig_models.update_yaxes(
+                automargin=True,
+                rangemode="normal" if st.session_state.saved_yscale == "Auto-Fit" else "tozero",
+                zeroline=False,
+            )
+            # Suppress ghost zero-line in rangeslider mini-chart
+            fig_models.update_layout(yaxis2=dict(showgrid=False, zeroline=False, showticklabels=False))
             st.plotly_chart(fig_models, use_container_width=True)
 
             if view_mode == "all":
@@ -333,5 +349,11 @@ with chart_col:
                 automargin=True,
                 rangeslider=dict(visible=True, thickness=0.04),
             )
-            fig_sum.update_yaxes(automargin=True)
+            fig_sum.update_yaxes(
+                automargin=True,
+                rangemode="normal" if st.session_state.saved_yscale == "Auto-Fit" else "tozero",
+                zeroline=False,
+            )
+            # Suppress ghost zero-line artifact in rangeslider
+            fig_sum.update_layout(yaxis2=dict(showgrid=False, zeroline=False, showticklabels=False))
             st.plotly_chart(fig_sum, use_container_width=True)
