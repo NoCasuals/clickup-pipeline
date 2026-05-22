@@ -10,36 +10,71 @@ from google.oauth2.service_account import Credentials
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="Model Progress Dashboard", layout="wide", initial_sidebar_state="collapsed")
 
-hide_st_style = """<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;} div[data-testid="stToolbar"] {visibility: hidden;}</style>"""
-st.markdown(hide_st_style, unsafe_allow_html=True)
+# Inject Javascript to handle sidebar toggling and hide UI elements
+js_code = """
+<script>
+    var button = window.parent.document.querySelector('[data-testid="stSidebarCollapseButton"]');
+    var openBtn = window.parent.document.getElementById('open_sidebar');
+    var closeBtn = window.parent.document.getElementById('close_sidebar');
+    
+    // Listen for custom streamlit events triggered by our buttons
+    window.parent.document.addEventListener('toggleSidebar', function(e) {
+        window.parent.document.querySelector('[data-testid="stSidebarCollapseButton"]').click();
+    });
+</script>
+"""
 
-# --- 2. THE SECURITY GATE (Must be placed before EVERYTHING else) ---
+# Custom CSS for button styling and UI cleanup
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
+            div[data-testid="stToolbar"] {visibility: hidden;}
+            .stButton>button {width: 100%;}
+            </style>
+            """
+st.markdown(hide_st_style + js_code, unsafe_allow_html=True)
+
+# --- 2. SECURITY GATE ---
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
-# Pull password from URL parameter (?pwd=...)
 url_password = st.query_params.get("pwd", "")
-# Pull master password from Streamlit Secrets
 secret_password = st.secrets.get("DASHBOARD_PASSWORD", "fallback_local_password")
 
 if url_password == secret_password:
     st.session_state["authenticated"] = True
 
-# If auth fails, render the lock screen and kill the script immediately
 if not st.session_state["authenticated"]:
     st.title("🔒 Private Operational Dashboard")
     user_input = st.text_input("Enter Access Password:", type="password")
-    
     if user_input == secret_password:
         st.session_state["authenticated"] = True
         st.rerun()
     else:
-        if user_input:
-            st.error("Invalid credentials.")
+        if user_input: st.error("Invalid credentials.")
         st.warning("This directory is restricted. Please authenticate to view.")
-        st.stop() # <-- COMPLETELY HALTS THE SCRIPT. Sidebar and data will not load.
+        st.stop()
 
-# --- 3. DATA FETCHING & CACHING ---
+# --- 3. THE TOGGLE ENGINE ---
+# A invisible container to execute JS clicks
+st.markdown("""
+    <script>
+    function triggerSidebar() {
+        window.parent.document.querySelector('[data-testid="stSidebarCollapseButton"]').click();
+    }
+    </script>
+""", unsafe_allow_html=True)
+
+# Define column layout for buttons at the top of the dashboard
+col1, col2, col3 = st.columns([1, 1, 8])
+if col1.button("📂 Open Settings"):
+    st.components.v1.html("<script>window.parent.document.querySelector('[data-testid=\"stSidebarCollapseButton\"]').click();</script>")
+    st.rerun()
+if col2.button("📁 Close Settings"):
+    st.components.v1.html("<script>window.parent.document.querySelector('[data-testid=\"stSidebarCollapseButton\"]').click();</script>")
+    st.rerun()
+
+# --- 4. DATA FETCHING & CACHING ---
 @st.cache_data(ttl=600)
 def load_data():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -50,26 +85,20 @@ def load_data():
     else:
         st.error("Missing Google Credentials.")
         st.stop()
-
     client = gspread.authorize(creds)
     SHEET_URL = "https://docs.google.com/spreadsheets/d/1RE039NcnPeQtQrvI5zjLyADzAr-ZseBPUq388SxkV-Y/edit"
     sheet = client.open_by_url(SHEET_URL).worksheets()[1] 
-    
     raw_data = sheet.get_all_values()
     df = pd.DataFrame(raw_data[1:], columns=raw_data[0])
     df.columns = ["Model Name", "Date", "KPI"]
-    
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.date
     df['KPI'] = pd.to_numeric(df['KPI'], errors='coerce')
     df = df.dropna(subset=['Date', 'KPI'])
-    
     df['Project Code'] = df['Model Name'].str.extract(r'(D\d{6})')
     df['Project Code'] = df['Project Code'].fillna('Standalone/Other')
-    
     overlap_groups = df.groupby(['Date', 'KPI'])['Model Name'].transform(lambda x: '<br> • '.join(sorted(x.unique())))
     df['Overlapping Models'] = '• ' + overlap_groups
     df['Overlap Count'] = df.groupby(['Date', 'KPI'])['Model Name'].transform('nunique')
-    
     df = df.sort_values(by=['Model Name', 'Date'])
     return df
 
