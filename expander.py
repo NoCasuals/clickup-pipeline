@@ -497,7 +497,10 @@ def main():
                         project_sheet_updates.append({
                             "model_name": f"{project_code} - {model_output}",
                             "loading_quotient": loading_quotient,
-                            "clickup_start_date": parent_col_k_str
+                            "clickup_start_date": parent_col_k_str,
+                            # Duration lives only on the parent task row (Sheet 1 Col G) and
+                            # is assumed identical for every model/block beneath it.
+                            "duration": row[6].strip() if len(row) > 6 else ""
                         })
                     
                     model_lookup_key = re.sub(r'[^A-Z0-9]', '', model_output.upper())
@@ -589,82 +592,81 @@ def main():
                     
                     proj_rows = proj_sheet.get_all_values()
                     today_str = datetime.now().strftime("%Y-%m-%d")
-                    rows_to_insert_at_top = []
-                    
+
+                    # Build a lookup of every existing Sheet 2 record:
+                    #   (MODEL NAME upper, date string) -> (1-based row number, current KPI string)
+                    # This lets us decide, per (model, day), whether an existing row needs
+                    # CHANGING or a brand-new row needs INSERTING. Rows are NEVER deleted.
+                    existing_index = {}
+                    for r_idx, r_cells in enumerate(proj_rows):
+                        if r_idx == 0:  # header row
+                            continue
+                        nm = r_cells[0].strip().upper() if len(r_cells) > 0 else ""
+                        dt = r_cells[1].strip() if len(r_cells) > 1 else ""
+                        kp = r_cells[2].strip() if len(r_cells) > 2 else ""
+                        if nm and dt:
+                            existing_index[(nm, dt)] = (r_idx + 1, kp)
+
+                    pending_updates = []         # (row_number, new_kpi) — only when value differs
+                    rows_to_insert_at_top = []   # brand-new [model, date, kpi] rows
+
                     for p_update in project_sheet_updates:
                         full_name = p_update["model_name"]
                         lq_val = str(p_update["loading_quotient"])
                         clickup_start_str = p_update.get("clickup_start_date", "")
-                        
-                        same_day_row_idx = None
-                        for r_idx, r_cells in enumerate(proj_rows):
-                            if r_idx == 0:  # Skip label headers
-                                continue
-                            if len(r_cells) > 0 and r_cells[0].strip().upper() == full_name.upper():
-                                if len(r_cells) > 1 and r_cells[1].strip() == today_str:
-                                    same_day_row_idx = r_idx + 1  
-                                    break
-                        
-                        if same_day_row_idx:
-                            # Rule: Same day modification update checks
-                            current_val = proj_rows[same_day_row_idx - 1][2].strip() if len(proj_rows[same_day_row_idx - 1]) > 2 else ""
-                            if current_val != lq_val:
-                                execute_with_retry(proj_sheet.update_cell, same_day_row_idx, 3, lq_val)
-                                print(f" [≠] CONSOLIDATED SHEET METRIC UPDATE: Row {same_day_row_idx} matched for '{full_name}'.")
-                        else:
-                            # Rule: New row logs for non-existing configurations or fresh execution periods
-                            rows_to_insert_at_top.append([full_name, today_str, lq_val])
-                        
-                        # --- BACKFILL PHASE: Gap-fill missing days between ClickUp start and earliest sheet 2 entry ---
+                        duration_str = p_update.get("duration", "")
+
+                        # Projection window = [ClickUp start date, start + duration days).
+                        # Start date comes from Sheet 1 Col K, duration from Sheet 1 Col G.
                         clickup_start_dt = clean_and_parse_date(clickup_start_str)
-                        if clickup_start_dt:
-                            # Collect all existing dates recorded for this model in sheet 2
-                            existing_model_dates = []
-                            existing_model_date_strs = set()
-                            for r_idx, r_cells in enumerate(proj_rows):
-                                if r_idx == 0:
-                                    continue
-                                if len(r_cells) > 0 and r_cells[0].strip().upper() == full_name.upper():
-                                    if len(r_cells) > 1 and r_cells[1].strip():
-                                        parsed_d = clean_and_parse_date(r_cells[1].strip())
-                                        if parsed_d:
-                                            existing_model_dates.append(parsed_d)
-                                            existing_model_date_strs.add(r_cells[1].strip())
-                            
-                            if existing_model_dates:
-                                earliest_existing = min(existing_model_dates)
-                                latest_existing = max(existing_model_dates)
-                                
-                                # Only backfill when the ClickUp start date predates the first recorded entry
-                                if earliest_existing > clickup_start_dt:
-                                    backfill_rows = []
-                                    current_day = clickup_start_dt
-                                    while current_day <= latest_existing:
-                                        day_str = current_day.strftime("%Y-%m-%d")
-                                        # Skip days that already have an entry for this model
-                                        if day_str not in existing_model_date_strs:
-                                            backfill_rows.append([full_name, day_str, lq_val])
-                                        current_day += timedelta(days=1)
-                                    
-                                    if backfill_rows:
-                                        execute_with_retry(
-                                            proj_sheet.insert_rows,
-                                            backfill_rows,
-                                            row=2,
-                                            value_input_option="USER_ENTERED"
-                                        )
-                                        print(f" [+] BACKFILL INJECTION: Inserted {len(backfill_rows)} gap rows for '{full_name}' "
-                                              f"spanning {clickup_start_dt} → {latest_existing}.")
-                    
+                        try:
+                            dur_days = int(round(float(str(duration_str).strip()))) if str(duration_str).strip() else 0
+                        except Exception:
+                            dur_days = 0
+
+                        # Every date this model should carry a KPI for. The current day is
+                        # always included so an active task is still logged even if its
+                        # window has already elapsed. Future dates within the window are the
+                        # projection the user asked for.
+                        dates_to_ensure = {today_str}
+                        if clickup_start_dt and dur_days > 0:
+                            for d in range(dur_days):
+                                day = clickup_start_dt + timedelta(days=d)
+                                dates_to_ensure.add(day.strftime("%Y-%m-%d"))
+
+                        # Decide CHANGE vs INSERT for each date (past, present, projected future).
+                        for day_str in sorted(dates_to_ensure):
+                            key = (full_name.upper(), day_str)
+                            if key in existing_index:
+                                row_num, current_kpi = existing_index[key]
+                                # Only rewrite when the value actually differs. This is exactly
+                                # what corrects a future day that was projected earlier with a
+                                # now-outdated KPI (e.g. tomorrow's projected value, fixed when
+                                # tomorrow's run computes the real KPI).
+                                if current_kpi != lq_val:
+                                    pending_updates.append((row_num, lq_val))
+                                    existing_index[key] = (row_num, lq_val)
+                            else:
+                                rows_to_insert_at_top.append([full_name, day_str, lq_val])
+
+                    # Apply CHANGES first, while the freshly-read row numbers are still valid.
+                    # (Inserts happen at row 2 and shift everything down, so they must follow.)
+                    for row_num, new_kpi in pending_updates:
+                        execute_with_retry(proj_sheet.update_cell, row_num, 3, new_kpi)
+                        print(f" [≠] CONSOLIDATED SHEET METRIC UPDATE: Row {row_num} re-synced to KPI {new_kpi}.")
+
+                    # Insert all new (model, date) rows — historical, current, and projected —
+                    # in a single batch at the top. Identical format to every other row.
                     if rows_to_insert_at_top:
-                        # Append always shifts downward directly below line 1 tags (into Row 2)
                         execute_with_retry(
                             proj_sheet.insert_rows,
                             rows_to_insert_at_top,
                             row=2,
                             value_input_option="USER_ENTERED"
                         )
-                        print(f" [✔] CONSOLIDATED SHEET ENTRY INJECTION: Appended {len(rows_to_insert_at_top)} historical rows starting into Row 2.")
+                        print(f" [✔] CONSOLIDATED SHEET ENTRY INJECTION: Added {len(rows_to_insert_at_top)} "
+                              f"logged/projected KPI rows starting at Row 2.")
+
                     
             except Exception as inner_e:
                 print(f"     [!] Error processing row index {idx + 1}: {str(inner_e)}")
