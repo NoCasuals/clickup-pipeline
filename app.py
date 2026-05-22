@@ -1,6 +1,7 @@
 import re
 import os
 import io
+import datetime
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -212,6 +213,7 @@ def apply_legend(fig, mode, inside=True):
 
 # --- 8. VISUALIZATION ---
 view_mode = st.query_params.get("view", "all").lower()
+today = datetime.date.today()   # used to extend the x-axis through the current day
 
 with chart_col:
     if final_df.empty:
@@ -298,8 +300,9 @@ with chart_col:
                 tickformat="%b %d, %Y",
                 tickangle=-40,
                 tickmode="auto",
-                nticks=14,
+                nticks=28,
                 automargin=True,
+                range=[final_df["Date"].min(), max(final_df["Date"].max(), today)],
                 rangeslider=dict(visible=True, thickness=0.04, yaxis=dict(rangemode="match")),
             )
             _yscale = st.session_state.saved_yscale
@@ -318,7 +321,7 @@ with chart_col:
         if view_mode in ["all", "summation"]:
             st.title("KPI Summation")
             sum_df  = final_df.groupby("Date", as_index=False)["KPI"].sum()
-            fig_sum = px.line(sum_df, x="Date", y="KPI", markers=True, height=500)
+            fig_sum = px.line(sum_df, x="Date", y="KPI", markers=True, height=750)
             fig_sum.update_traces(
                 hovertemplate=(
                     "<b>📅 Date:</b> %{x}<br>"
@@ -344,9 +347,10 @@ with chart_col:
                 tickformat="%b %d, %Y",
                 tickangle=-40,
                 tickmode="auto",
-                nticks=14,
+                nticks=28,
                 automargin=True,
-                rangeslider=dict(visible=True, thickness=0.04, yaxis=dict(rangemode="match")),
+                range=[sum_df["Date"].min(), max(sum_df["Date"].max(), today)],
+                rangeslider=dict(visible=False),
             )
             _yscale = st.session_state.saved_yscale
             fig_sum.update_yaxes(
