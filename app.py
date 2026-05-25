@@ -29,8 +29,9 @@ st.markdown("""
     div[data-testid="stToolbar"] {visibility: hidden;}
     /* Tighten up radio button row spacing */
     div[data-testid="stHorizontalBlock"] > div { gap: 0.25rem; }
-    /* Remove top gap above plotly charts */
-    div[data-testid="stPlotlyChart"] { margin-top: -2rem; }
+    /* Pull chart up — the t=140 plotly margin already reserves tooltip space
+       above the plot area, so we only need a small CSS nudge here. */
+    div[data-testid="stPlotlyChart"] { margin-top: -1rem; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -292,12 +293,12 @@ with chart_col:
                 xaxis_title="<b>Date</b>",
                 yaxis_title="<b>KPI</b>",
                 legend_title="Active Models",
-                margin=dict(l=85, r=20, t=0, b=110),
+                margin=dict(l=85, r=20, t=140, b=110),
                 hovermode="closest",
                 font=dict(size=13),
                 xaxis_title_font=dict(size=20, family="Arial-Bold, Arial"),
                 yaxis_title_font=dict(size=20, family="Arial-Bold, Arial"),
-                hoverlabel=dict(font_size=16, font_family="Arial", align="left"),
+                hoverlabel=dict(font_size=16, font_family="Arial", align="left", namelength=-1),
             )
 
             apply_legend(fig_models, st.session_state.legend_mode, inside=True)
@@ -345,12 +346,12 @@ with chart_col:
                 xaxis_title="<b>Date</b>",
                 yaxis_title="<b>Total KPI</b>",
                 showlegend=False,
-                margin=dict(l=85, r=20, t=0, b=110),
+                margin=dict(l=85, r=20, t=140, b=110),
                 hovermode="closest",
                 font=dict(size=13),
                 xaxis_title_font=dict(size=20, family="Arial-Bold, Arial"),
                 yaxis_title_font=dict(size=20, family="Arial-Bold, Arial"),
-                hoverlabel=dict(font_size=16, font_family="Arial", align="left"),
+                hoverlabel=dict(font_size=16, font_family="Arial", align="left", namelength=-1),
             )
             
             # Updated dynamic axes mapping using nticks logic
