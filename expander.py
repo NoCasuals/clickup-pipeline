@@ -2,6 +2,8 @@ import re
 import io
 import time
 import random
+import numpy as np
+import pandas as pd
 import openpyxl
 from datetime import datetime, timedelta
 import gspread
@@ -523,7 +525,10 @@ def main():
                             "clickup_start_date": parent_col_k_str,
                             # Duration lives only on the parent task row (Sheet 1 Col G) and
                             # is assumed identical for every model/block beneath it.
-                            "duration": row[6].strip() if len(row) > 6 else ""
+                            "duration": row[6].strip() if len(row) > 6 else "",
+                            # Due date from Sheet 1 Col L — used to define the exact last
+                            # business day of the projection window in Sheet 2.
+                            "clickup_due_date": row[11].strip() if len(row) > 11 else ""
                         })
                     
                     model_lookup_key = re.sub(r'[^A-Z0-9]', '', model_output.upper())
@@ -637,25 +642,23 @@ def main():
                         full_name = p_update["model_name"]
                         lq_val = str(p_update["loading_quotient"])
                         clickup_start_str = p_update.get("clickup_start_date", "")
-                        duration_str = p_update.get("duration", "")
+                        clickup_due_str   = p_update.get("clickup_due_date", "")
 
-                        # Projection window = [ClickUp start date, start + duration days).
-                        # Start date comes from Sheet 1 Col K, duration from Sheet 1 Col G.
+                        # Projection window = all business days in [start, due] inclusive.
+                        # Both bounds come directly from ClickUp (Col K = start, Col L = due),
+                        # so the last projected row in Sheet 2 always lands on the exact due date
+                        # regardless of how many business days that span contains.
                         clickup_start_dt = clean_and_parse_date(clickup_start_str)
-                        try:
-                            dur_days = int(round(float(str(duration_str).strip()))) if str(duration_str).strip() else 0
-                        except Exception:
-                            dur_days = 0
+                        clickup_due_dt   = clean_and_parse_date(clickup_due_str)
 
-                        # Every date this model should carry a KPI for. The current day is
-                        # always included so an active task is still logged even if its
-                        # window has already elapsed. Future dates within the window are the
-                        # projection the user asked for.
+                        # Current day is always included so an active task logs even if
+                        # its window has already elapsed or dates are missing.
                         dates_to_ensure = {today_str}
-                        if clickup_start_dt and dur_days > 0:
-                            for d in range(dur_days):
-                                day = clickup_start_dt + timedelta(days=d)
-                                dates_to_ensure.add(day.strftime("%Y-%m-%d"))
+                        if clickup_start_dt and clickup_due_dt and clickup_due_dt >= clickup_start_dt:
+                            # pd.bdate_range(start, end) returns business days in [start, end] inclusive.
+                            # This lands the last Sheet 2 row exactly on the ClickUp due date.
+                            for bd in pd.bdate_range(str(clickup_start_dt), str(clickup_due_dt)):
+                                dates_to_ensure.add(str(bd.date()))
 
                         # Decide CHANGE vs INSERT for each date (past, present, projected future).
                         for day_str in sorted(dates_to_ensure):
