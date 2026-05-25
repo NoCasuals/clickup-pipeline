@@ -23,16 +23,18 @@ def get_google_sheet_client():
     return gspread.authorize(creds)
 
 def execute_with_retry(func, *args, **kwargs):
-    """Protects the pipeline from Google Write Quota limitations (429 errors)."""
-    max_retries = 5
-    base_delay = 5
+    """Protects the pipeline from Google Write Quota limitations (429 errors).
+    Backoff schedule (base 15s): 15, 30, 60, 120, 240, 480, 960s — gives the
+    per-minute quota window plenty of time to reset before each retry."""
+    max_retries = 8
+    base_delay = 15
     for attempt in range(max_retries):
         try:
             return func(*args, **kwargs)
         except gspread.exceptions.APIError as e:
             if "429" in str(e) and attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                print(f" [!] Write quota limit hit (429). Retrying in {delay:.2f}s...")
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
+                print(f" [!] Write quota limit hit (429). Retrying in {delay:.2f}s... (attempt {attempt + 1}/{max_retries})")
                 time.sleep(delay)
             else:
                 raise e
@@ -133,7 +135,6 @@ def main():
         if progression_status == "FIRST MARKUP" and native_status == "TIMELINE" and re.match(r'^D\d{6}', name):
             duration_val = ""
             start_date_str = ""
-            due_date_str = ""
             start_date_ms = task.get("start_date")
             due_date_ms = task.get("due_date")
 
@@ -146,13 +147,6 @@ def main():
             if start_date_ms:
                 try:
                     start_date_str = ms_to_eastern_date(start_date_ms).strftime("%Y-%m-%d")
-                except Exception:
-                    pass
-
-            # Format and capture the ClickUp due date string (Eastern time)
-            if due_date_ms:
-                try:
-                    due_date_str = ms_to_eastern_date(due_date_ms).strftime("%Y-%m-%d")
                 except Exception:
                     pass
 
@@ -170,8 +164,7 @@ def main():
                     
             active_first_markup_tasks[name] = {
                 "duration": duration_val,
-                "start_date": start_date_str,
-                "due_date": due_date_str
+                "start_date": start_date_str
             }
 
     print(f" -> Found {len(active_first_markup_tasks)} items matching [Status: TIMELINE], [Progression: FIRST MARKUP], and [Naming Code: D######].")
@@ -220,15 +213,25 @@ def main():
         if task_name in active_first_markup_tasks:
             matched_log_names.add(task_name)
             task_info = active_first_markup_tasks[task_name]
-            duration_str = str(task_info["duration"])
-            st_date_str = task_info["start_date"]
-            due_date_str = task_info["due_date"]
-            
-            # Action: Target Update -> Sync Date (Col A), Duration (Col G), Start Date (Col K), Due Date (Col L)
-            execute_with_retry(log_sheet.update_cell, p_row, 1, today_str)
-            execute_with_retry(log_sheet.update_cell, p_row, 7, duration_str)   # Column G
-            execute_with_retry(log_sheet.update_cell, p_row, 11, st_date_str)   # Column K
-            execute_with_retry(log_sheet.update_cell, p_row, 12, due_date_str)  # Column L
+            duration_str  = str(task_info["duration"])
+            st_date_str   = task_info["start_date"]
+            due_date_str  = task_info["due_date"]
+
+            # Batch all four column updates into a single API call to minimise
+            # write-quota consumption. Columns written: A, G, K, L.
+            # Columns B-F, H-J are left untouched by using named ranges.
+            execute_with_retry(log_sheet.update,
+                range_name=f"A{p_row}",
+                values=[[today_str]],
+                value_input_option="USER_ENTERED")
+            execute_with_retry(log_sheet.update,
+                range_name=f"G{p_row}:G{p_row}",
+                values=[[duration_str]],
+                value_input_option="USER_ENTERED")
+            execute_with_retry(log_sheet.update,
+                range_name=f"K{p_row}:L{p_row}",
+                values=[[st_date_str, due_date_str]],
+                value_input_option="USER_ENTERED")
             print(f" [≠] UPDATED: Synced row {p_row} metrics for tracking log item '{task_name}'.")
         else:
             # Action: Clean Deletion -> Queue the parent row and all child rows for removal
@@ -240,12 +243,12 @@ def main():
     fresh_insertions = []
     for task_name, task_info in active_first_markup_tasks.items():
         if task_name not in matched_log_names:
-            duration_str = str(task_info["duration"])
-            st_date_str = task_info["start_date"]
-            due_date_str = task_info["due_date"]
-            
-            # Row Grid Layout Mapping Matrix:
-            # A: today_str | B: task_name | C: "" | D: "" | E: "" | F: "" | G: duration_str | H: "" | I: "" | J: "" | K: st_date_str | L: due_date_str
+            duration_str  = str(task_info["duration"])
+            st_date_str   = task_info["start_date"]
+            due_date_str  = task_info["due_date"]
+
+            # Row Grid Layout:
+            # A: today_str | B: task_name | G: duration_str | K: st_date_str | L: due_date_str
             fresh_insertions.append([today_str, task_name, "", "", "", "", duration_str, "", "", "", st_date_str, due_date_str])
             print(f" [✔] NEW RECORD DETECTED: Queued '{task_name}' for entry.")
 
