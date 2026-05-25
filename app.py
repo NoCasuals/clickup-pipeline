@@ -7,9 +7,21 @@ import pandas as pd
 import plotly.express as px
 import gspread
 from google.oauth2.service_account import Credentials
+from streamlit_js_eval import streamlit_js_eval
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="Model Progress Dashboard", layout="wide")
+
+# Read the embed window's pixel width via JS. Returns None on the very first
+# render (before JS has run), so we fall back to 1100px — a reasonable default
+# for the ClickUp embed pane. On every subsequent render the real value is used.
+_raw_width = streamlit_js_eval(js_expressions="window.innerWidth", key="_win_w")
+window_width = int(_raw_width) if _raw_width else 1100
+
+# Chart height = 42% of window width, clamped between 360 px and 900 px.
+# Wider embed → taller chart → more vertical separation between clustered lines.
+# Narrower embed → shorter chart → no wasted blank space below the plot.
+CHART_HEIGHT = max(360, min(900, int(window_width * 0.42)))
 
 st.markdown("""
     <style>
@@ -241,11 +253,7 @@ with chart_col:
                 st.session_state.legend_mode = chosen
 
             unique_model_count = len(final_df['Model Name'].unique())
-
-            if st.session_state.legend_mode == "🚫 Hidden":
-                calculated_height = max(480, unique_model_count * 7 + 200)
-            else:
-                calculated_height = max(560, unique_model_count * 10 + 220)
+            calculated_height = CHART_HEIGHT
 
             final_df = final_df.copy()
             final_df['Display KPI'] = final_df['KPI']
@@ -320,7 +328,7 @@ with chart_col:
         if view_mode in ["all", "summation"]:
             st.title("KPI Summation")
             sum_df  = final_df.groupby("Date", as_index=False)["KPI"].sum()
-            fig_sum = px.line(sum_df, x="Date", y="KPI", markers=True, height=750)
+            fig_sum = px.line(sum_df, x="Date", y="KPI", markers=True, height=CHART_HEIGHT)
             fig_sum.update_traces(
                 hovertemplate=(
                     "<b>📅 Date:</b> %{x}<br>"
