@@ -270,7 +270,7 @@ with chart_col:
                 x="Date", y="Display KPI",
                 color="Model Name",
                 markers=True,
-                height=calculated_height,
+                height= (calculated_height - 5),
                 custom_data=["Model Name", "KPI", "Overlapping Models", "Overlap Count"]
             )
             fig_models.update_traces(
@@ -328,7 +328,7 @@ with chart_col:
         if view_mode in ["all", "summation"]:
             st.title("KPI Summation")
             sum_df  = final_df.groupby("Date", as_index=False)["KPI"].sum()
-            fig_sum = px.line(sum_df, x="Date", y="KPI", markers=True, height=CHART_HEIGHT)
+            fig_sum = px.line(sum_df, x="Date", y="KPI", markers=True, height=(CHART_HEIGHT - 5))
             fig_sum.update_traces(
                 hovertemplate=(
                     "<b>📅 Date:</b> %{x}<br>"
