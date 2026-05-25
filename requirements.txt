@@ -1,5 +1,4 @@
 streamlit
-streamlit-js-eval
 pandas
 plotly
 gspread
