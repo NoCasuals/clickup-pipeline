@@ -17,9 +17,11 @@ st.markdown("""
     div[data-testid="stToolbar"] {visibility: hidden;}
     /* Tighten up radio button row spacing */
     div[data-testid="stHorizontalBlock"] > div { gap: 0.25rem; }
-    /* Pull chart up — the t=140 plotly margin already reserves tooltip space
-       above the plot area, so we only need a small CSS nudge here. */
-    div[data-testid="stPlotlyChart"] { margin-top: -1rem; }
+    /* Small top gap — just enough so the Plotly toolbar isn't clipped by the
+       iframe edge. The t=50 figure margin reserves space above the plot area. */
+    div[data-testid="stPlotlyChart"] { margin-top: 0.25rem; }
+    /* Keep period nav buttons compact and visually tight */
+    div[data-testid="stButton"] > button { padding: 0.2rem 0.7rem; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -90,19 +92,79 @@ if 'saved_projects' not in st.session_state: st.session_state.saved_projects = [
 if 'saved_models'   not in st.session_state: st.session_state.saved_models   = []
 if 'saved_yscale'   not in st.session_state: st.session_state.saved_yscale   = "Linear"
 
+# Period navigation state
+if 'time_view'      not in st.session_state: st.session_state.time_view      = "Month"
+if 'period_offset'  not in st.session_state: st.session_state.period_offset  = 0
+
+# Reset offset whenever the view type changes
+def set_view(v):
+    if st.session_state.time_view != v:
+        st.session_state.time_view     = v
+        st.session_state.period_offset = 0
+
+def get_period_bounds(view, offset, today):
+    """Return (x_start, x_end) date objects for the chosen view + offset."""
+    td = datetime.timedelta
+    if view == "Week":
+        monday = today - td(days=today.weekday())
+        start  = monday + td(weeks=offset)
+        end    = start  + td(days=6)
+        return start, end
+    if view == "Month":
+        # Shift month by offset, handling year rollovers
+        raw_month = today.month - 1 + offset          # 0-based total months
+        year  = today.year + raw_month // 12
+        month = raw_month % 12 + 1
+        start = datetime.date(year, month, 1)
+        # last day of that month
+        if month == 12:
+            end = datetime.date(year + 1, 1, 1) - td(days=1)
+        else:
+            end = datetime.date(year, month + 1, 1) - td(days=1)
+        return start, end
+    if view == "Quarter":
+        cur_q    = (today.month - 1) // 3              # 0-based quarter index
+        total_q  = today.year * 4 + cur_q + offset
+        q_year   = total_q // 4
+        q_num    = total_q % 4                         # 0-based 0-3
+        q_m_start = q_num * 3 + 1                      # 1,4,7,10
+        start    = datetime.date(q_year, q_m_start, 1)
+        q_m_end  = q_m_start + 2                       # last month of quarter
+        if q_m_end == 12:
+            end = datetime.date(q_year + 1, 1, 1) - td(days=1)
+        else:
+            end = datetime.date(q_year, q_m_end + 1, 1) - td(days=1)
+        return start, end
+    # All Time — caller handles this case
+    return None, None
+
 # Legend mode: hidden by default so chart is compact; user can expand
 if 'legend_mode' not in st.session_state:
     st.session_state.legend_mode = "🚫 Hidden"
 
-# Settings open/close toggle
-if not st.session_state["sidebar_is_open"]:
-    if st.button("📂 Open Settings"):
-        st.session_state["sidebar_is_open"] = True
-        st.rerun()
-else:
-    if st.button("📁 Close Settings"):
-        st.session_state["sidebar_is_open"] = False
-        st.rerun()
+# --- TOP CONTROL BAR: Settings toggle + period selector + prev/next ---
+ctrl_s, ctrl_mo, ctrl_wk, ctrl_qtr, ctrl_all, ctrl_prev, ctrl_next = st.columns(
+    [1.1, 0.7, 0.65, 0.85, 0.9, 0.6, 0.6], gap="small"
+)
+
+with ctrl_s:
+    if not st.session_state["sidebar_is_open"]:
+        if st.button("📂 Open Settings"):
+            st.session_state["sidebar_is_open"] = True
+            st.rerun()
+    else:
+        if st.button("📁 Close Settings"):
+            st.session_state["sidebar_is_open"] = False
+            st.rerun()
+
+with ctrl_mo:
+    if st.button("📅 Month",   type="primary" if st.session_state.time_view == "Month"   else "secondary"): set_view("Month")
+with ctrl_wk:
+    if st.button("📅 Week",    type="primary" if st.session_state.time_view == "Week"    else "secondary"): set_view("Week")
+with ctrl_qtr:
+    if st.button("📅 Quarter", type="primary" if st.session_state.time_view == "Quarter" else "secondary"): set_view("Quarter")
+with ctrl_all:
+    if st.button("📅 All Time",type="primary" if st.session_state.time_view == "All Time" else "secondary"): set_view("All Time")
 
 # --- 5. LAYOUT & FILTERS ---
 if st.session_state["sidebar_is_open"]:
@@ -149,9 +211,38 @@ else:
 filtered_df = df if not st.session_state.saved_projects else df[df['Project Code'].isin(st.session_state.saved_projects)]
 final_df    = filtered_df if not st.session_state.saved_models else filtered_df[filtered_df['Model Name'].isin(st.session_state.saved_models)]
 
-# Weekdays only (Mon–Fri). Removing weekends here means neither chart needs
-# rangebreaks, avoiding the rangebreaks+rangeslider conflict that blanked chart 1.
+# Weekdays only (Mon–Fri).
 final_df = final_df[pd.to_datetime(final_df['Date']).dt.dayofweek < 5].copy()
+
+# --- 6b. PERIOD NAVIGATION BOUNDS ---
+_data_min = pd.to_datetime(final_df['Date']).min().date() if not final_df.empty else today
+_data_max = pd.to_datetime(final_df['Date']).max().date() if not final_df.empty else today
+
+_view = st.session_state.time_view
+_off  = st.session_state.period_offset
+
+if _view == "All Time":
+    x_start = _data_min - datetime.timedelta(days=1)
+    x_end   = _data_max + datetime.timedelta(days=1)
+    _can_prev = False
+    _can_next = False
+else:
+    x_start, x_end = get_period_bounds(_view, _off, today)
+    # Prev is valid if the previous period still overlaps data
+    prev_s, prev_e = get_period_bounds(_view, _off - 1, today)
+    _can_prev = prev_e >= _data_min
+    # Next is valid if the next period doesn't start after the furthest data point
+    next_s, next_e = get_period_bounds(_view, _off + 1, today)
+    _can_next = next_s <= _data_max
+
+with ctrl_prev:
+    if st.button("◀ Prev", disabled=not _can_prev):
+        st.session_state.period_offset -= 1
+        st.rerun()
+with ctrl_next:
+    if st.button("Next ▶", disabled=not _can_next):
+        st.session_state.period_offset += 1
+        st.rerun()
 
 # --- 7. LEGEND MODE HELPER ---
 LEGEND_OPTIONS = ["🚫 Hidden", "📁 By Project", "📋 All Models"]
@@ -209,19 +300,6 @@ with chart_col:
     if final_df.empty:
         st.warning("No data available for the selected filters.")
     else:
-        # --- DYNAMIC 3-MONTH DATE WINDOW LOGIC ---
-        max_date_ts = pd.to_datetime(final_df['Date']).max()
-        max_date = today if pd.isna(max_date_ts) else max_date_ts.date()
-
-        right_bound_if_centered = today + datetime.timedelta(days=44)
-        
-        if right_bound_if_centered < max_date:
-            x_start = today - datetime.timedelta(days=44)
-            x_end = today + datetime.timedelta(days=44)
-        else:
-            x_end = max_date + datetime.timedelta(days=1)
-            x_start = x_end - datetime.timedelta(days=88)
-
         # Compute height once here so both charts can use it regardless of view_mode
         unique_model_count = len(final_df['Model Name'].unique())
         calculated_height = max(480, min(900, 300 + unique_model_count * 22))
@@ -281,7 +359,7 @@ with chart_col:
                 xaxis_title="<b>Date</b>",
                 yaxis_title="<b>KPI</b>",
                 legend_title="Active Models",
-                margin=dict(l=85, r=20, t=140, b=110),
+                margin=dict(l=85, r=20, t=50, b=110),
                 hovermode="closest",
                 font=dict(size=13),
                 xaxis_title_font=dict(size=20, family="Arial-Bold, Arial"),
@@ -334,7 +412,7 @@ with chart_col:
                 xaxis_title="<b>Date</b>",
                 yaxis_title="<b>Total KPI</b>",
                 showlegend=False,
-                margin=dict(l=85, r=20, t=140, b=110),
+                margin=dict(l=85, r=20, t=50, b=110),
                 hovermode="closest",
                 font=dict(size=13),
                 xaxis_title_font=dict(size=20, family="Arial-Bold, Arial"),
