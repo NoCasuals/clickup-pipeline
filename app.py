@@ -152,29 +152,15 @@ def get_period_bounds(view, offset, today):
 if 'legend_mode' not in st.session_state:
     st.session_state.legend_mode = "🚫 Hidden"
 
-# --- TOP CONTROL BAR: Settings toggle + period selector + prev/next ---
-ctrl_s, ctrl_mo, ctrl_wk, ctrl_qtr, ctrl_all, ctrl_prev, ctrl_next = st.columns(
-    [1.1, 0.7, 0.65, 0.85, 0.9, 0.6, 0.6], gap="small"
-)
-
-with ctrl_s:
-    if not st.session_state["sidebar_is_open"]:
-        if st.button("📂 Open Settings"):
-            st.session_state["sidebar_is_open"] = True
-            st.rerun()
-    else:
-        if st.button("📁 Close Settings"):
-            st.session_state["sidebar_is_open"] = False
-            st.rerun()
-
-with ctrl_mo:
-    if st.button("📅 Month",   type="primary" if st.session_state.time_view == "Month"   else "secondary"): set_view("Month")
-with ctrl_wk:
-    if st.button("📅 Week",    type="primary" if st.session_state.time_view == "Week"    else "secondary"): set_view("Week")
-with ctrl_qtr:
-    if st.button("📅 Quarter", type="primary" if st.session_state.time_view == "Quarter" else "secondary"): set_view("Quarter")
-with ctrl_all:
-    if st.button("📅 All Time",type="primary" if st.session_state.time_view == "All Time" else "secondary"): set_view("All Time")
+# --- Settings button only at top ---
+if not st.session_state["sidebar_is_open"]:
+    if st.button("📂 Open Settings"):
+        st.session_state["sidebar_is_open"] = True
+        st.rerun()
+else:
+    if st.button("📁 Close Settings"):
+        st.session_state["sidebar_is_open"] = False
+        st.rerun()
 
 # --- 5. LAYOUT & FILTERS ---
 if st.session_state["sidebar_is_open"]:
@@ -245,14 +231,8 @@ else:
     next_s, next_e = get_period_bounds(_view, _off + 1, today)
     _can_next = next_s <= _data_max
 
-with ctrl_prev:
-    if st.button("◀ Prev", disabled=not _can_prev):
-        st.session_state.period_offset -= 1
-        st.rerun()
-with ctrl_next:
-    if st.button("Next ▶", disabled=not _can_next):
-        st.session_state.period_offset += 1
-        st.rerun()
+
+
 
 # --- 7. LEGEND MODE HELPER ---
 LEGEND_OPTIONS = ["🚫 Hidden", "📁 By Project", "📋 All Models"]
@@ -305,6 +285,46 @@ def apply_legend(fig, mode, inside=True):
 # --- 8. VISUALIZATION ---
 view_mode = st.query_params.get("view", "all").lower()
 
+def render_nav_row(view_key, offset_key, set_fn, btn_prefix, data_min, data_max):
+    """Render a compact period-selector + prev/next row for one chart.
+    Buttons are left-aligned; a spacer column absorbs the remaining width."""
+    _v = st.session_state[view_key]
+    _o = st.session_state[offset_key]
+
+    if _v == "All Time":
+        can_prev, can_next = False, False
+    else:
+        _, prev_e = get_period_bounds(_v, _o - 1, today)
+        next_s, _ = get_period_bounds(_v, _o + 1, today)
+        can_prev = prev_e >= data_min
+        can_next = next_s <= data_max
+
+    # Tight left-aligned columns; spacer takes the rest
+    c_mo, c_wk, c_qtr, c_all, c_prev, c_next, _ = st.columns(
+        [1, 0.9, 1.2, 1.3, 0.9, 0.9, 6], gap="small"
+    )
+    with c_mo:
+        if st.button("Month",   key=f"{btn_prefix}_mo",   type="primary" if _v=="Month"    else "secondary"): set_fn("Month")
+    with c_wk:
+        if st.button("Week",    key=f"{btn_prefix}_wk",   type="primary" if _v=="Week"     else "secondary"): set_fn("Week")
+    with c_qtr:
+        if st.button("Quarter", key=f"{btn_prefix}_qtr",  type="primary" if _v=="Quarter"  else "secondary"): set_fn("Quarter")
+    with c_all:
+        if st.button("All Time",key=f"{btn_prefix}_all",  type="primary" if _v=="All Time" else "secondary"): set_fn("All Time")
+    with c_prev:
+        if st.button("◀ Prev", key=f"{btn_prefix}_prev", disabled=not can_prev):
+            st.session_state[offset_key] -= 1
+            st.rerun()
+    with c_next:
+        if st.button("Next ▶", key=f"{btn_prefix}_next", disabled=not can_next):
+            st.session_state[offset_key] += 1
+            st.rerun()
+
+    # Return the current x bounds
+    if _v == "All Time":
+        return data_min - datetime.timedelta(days=1), data_max + datetime.timedelta(days=1)
+    return get_period_bounds(_v, _o, today)
+
 with chart_col:
     if final_df.empty:
         st.warning("No data available for the selected filters.")
@@ -330,6 +350,11 @@ with chart_col:
                     label_visibility="collapsed",
                 )
                 st.session_state.legend_mode = chosen
+
+            x_start, x_end = render_nav_row(
+                "time_view", "period_offset", set_view, "c1",
+                _data_min, _data_max
+            )
 
             unique_model_count = len(final_df['Model Name'].unique())
 
@@ -406,39 +431,10 @@ with chart_col:
         if view_mode in ["all", "summation"]:
             st.title("KPI Summation")
 
-            # Independent period nav for chart 2
-            _v2 = st.session_state.time_view2
-            _o2 = st.session_state.period_offset2
-            if _v2 == "All Time":
-                x_start2, x_end2 = _data_min - datetime.timedelta(days=1), _data_max + datetime.timedelta(days=1)
-                _can_prev2 = False
-                _can_next2 = False
-            else:
-                x_start2, x_end2 = get_period_bounds(_v2, _o2, today)
-                prev_s2, prev_e2 = get_period_bounds(_v2, _o2 - 1, today)
-                _can_prev2 = prev_e2 >= _data_min
-                next_s2, next_e2 = get_period_bounds(_v2, _o2 + 1, today)
-                _can_next2 = next_s2 <= _data_max
-
-            s2_mo, s2_wk, s2_qtr, s2_all, s2_prev, s2_next = st.columns(
-                [0.7, 0.65, 0.85, 0.9, 0.6, 0.6], gap="small"
+            x_start2, x_end2 = render_nav_row(
+                "time_view2", "period_offset2", set_view2, "c2",
+                _data_min, _data_max
             )
-            with s2_mo:
-                if st.button("📅 Month",    key="s2_mo",  type="primary" if _v2=="Month"    else "secondary"): set_view2("Month")
-            with s2_wk:
-                if st.button("📅 Week",     key="s2_wk",  type="primary" if _v2=="Week"     else "secondary"): set_view2("Week")
-            with s2_qtr:
-                if st.button("📅 Quarter",  key="s2_qtr", type="primary" if _v2=="Quarter"  else "secondary"): set_view2("Quarter")
-            with s2_all:
-                if st.button("📅 All Time", key="s2_all", type="primary" if _v2=="All Time" else "secondary"): set_view2("All Time")
-            with s2_prev:
-                if st.button("◀ Prev", key="s2_prev", disabled=not _can_prev2):
-                    st.session_state.period_offset2 -= 1
-                    st.rerun()
-            with s2_next:
-                if st.button("Next ▶", key="s2_next", disabled=not _can_next2):
-                    st.session_state.period_offset2 += 1
-                    st.rerun()
 
             sum_df  = final_df.groupby("Date", as_index=False)["KPI"].sum()
             fig_sum = px.line(sum_df, x="Date", y="KPI", markers=True, height=calculated_height)
