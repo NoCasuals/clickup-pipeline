@@ -106,11 +106,13 @@ def set_view(v):
     if st.session_state.time_view != v:
         st.session_state.time_view     = v
         st.session_state.period_offset = 0
+        st.rerun()
 
 def set_view2(v):
     if st.session_state.time_view2 != v:
         st.session_state.time_view2     = v
         st.session_state.period_offset2 = 0
+        st.rerun()
 
 def get_period_bounds(view, offset, today):
     """Return (x_start, x_end) date objects for the chosen view + offset."""
@@ -285,9 +287,16 @@ def apply_legend(fig, mode, inside=True):
 # --- 8. VISUALIZATION ---
 view_mode = st.query_params.get("view", "all").lower()
 
-def render_nav_row(view_key, offset_key, set_fn, btn_prefix, data_min, data_max):
-    """Render a compact period-selector + prev/next row for one chart.
-    Buttons are left-aligned; a spacer column absorbs the remaining width."""
+VIEW_ORDER = ["Week", "Month", "Quarter", "All Time"]
+
+def get_nticks(view):
+    return {"Week": 5, "Month": 23, "Quarter": 14, "All Time": 20}.get(view, 20)
+
+def inline_title_nav(title, view_key, offset_key, set_fn, btn_prefix,
+                     data_min, data_max, extra_col=None):
+    """Render title + period buttons + Prev/Next all on one compact row.
+    extra_col: optional (width, callable) for an additional widget (e.g. legend radio).
+    Returns (x_start, x_end, nticks)."""
     _v = st.session_state[view_key]
     _o = st.session_state[offset_key]
 
@@ -299,31 +308,48 @@ def render_nav_row(view_key, offset_key, set_fn, btn_prefix, data_min, data_max)
         can_prev = prev_e >= data_min
         can_next = next_s <= data_max
 
-    # Tight left-aligned columns; spacer takes the rest
-    c_mo, c_wk, c_qtr, c_all, c_prev, c_next, _ = st.columns(
-        [1, 0.9, 1.2, 1.3, 0.9, 0.9, 6], gap="small"
-    )
-    with c_mo:
-        if st.button("Month",   key=f"{btn_prefix}_mo",   type="primary" if _v=="Month"    else "secondary"): set_fn("Month")
-    with c_wk:
-        if st.button("Week",    key=f"{btn_prefix}_wk",   type="primary" if _v=="Week"     else "secondary"): set_fn("Week")
-    with c_qtr:
-        if st.button("Quarter", key=f"{btn_prefix}_qtr",  type="primary" if _v=="Quarter"  else "secondary"): set_fn("Quarter")
-    with c_all:
-        if st.button("All Time",key=f"{btn_prefix}_all",  type="primary" if _v=="All Time" else "secondary"): set_fn("All Time")
-    with c_prev:
+    extra_w  = extra_col[0] if extra_col else 0
+    title_w  = 2.2
+    spacer_w = 1.0
+    btn_ws   = [0.75, 0.85, 1.0, 1.1]
+    nav_ws   = [0.85, 0.85]
+    widths   = [title_w] + ([extra_w] if extra_col else []) + [spacer_w] + btn_ws + nav_ws
+    cols     = st.columns(widths, gap="small")
+    ci = 0
+
+    with cols[ci]:
+        st.markdown(f"### {title}")
+    ci += 1
+
+    if extra_col:
+        with cols[ci]:
+            extra_col[1]()
+        ci += 1
+
+    ci += 1  # skip spacer
+
+    for label in VIEW_ORDER:
+        with cols[ci]:
+            if st.button(label, key=f"{btn_prefix}_{label}",
+                         type="primary" if _v == label else "secondary"):
+                set_fn(label)
+        ci += 1
+
+    with cols[ci]:
         if st.button("◀ Prev", key=f"{btn_prefix}_prev", disabled=not can_prev):
             st.session_state[offset_key] -= 1
             st.rerun()
-    with c_next:
+    ci += 1
+    with cols[ci]:
         if st.button("Next ▶", key=f"{btn_prefix}_next", disabled=not can_next):
             st.session_state[offset_key] += 1
             st.rerun()
 
-    # Return the current x bounds
     if _v == "All Time":
-        return data_min - datetime.timedelta(days=1), data_max + datetime.timedelta(days=1)
-    return get_period_bounds(_v, _o, today)
+        return data_min - datetime.timedelta(days=1), data_max + datetime.timedelta(days=1), get_nticks(_v)
+    xs, xe = get_period_bounds(_v, _o, today)
+    return xs, xe, get_nticks(_v)
+
 
 with chart_col:
     if final_df.empty:
@@ -336,24 +362,21 @@ with chart_col:
         # ── CHART 1: INDIVIDUAL MODELS ────────────────────────────────────
         if view_mode in ["all", "models"]:
 
-            title_col, legend_ctl_col = st.columns([3, 2])
-            with title_col:
-                st.title("KPI per Model Over Time")
-            with legend_ctl_col:
+            def _legend_widget():
                 st.write("")
                 chosen = st.radio(
-                    "Legend",
-                    options=LEGEND_OPTIONS,
+                    "Legend", options=LEGEND_OPTIONS,
                     index=LEGEND_OPTIONS.index(st.session_state.legend_mode),
-                    horizontal=True,
-                    key="legend_radio_1",
+                    horizontal=True, key="legend_radio_1",
                     label_visibility="collapsed",
                 )
                 st.session_state.legend_mode = chosen
 
-            x_start, x_end = render_nav_row(
+            x_start, x_end, _nticks1 = inline_title_nav(
+                "KPI per Model Over Time",
                 "time_view", "period_offset", set_view, "c1",
-                _data_min, _data_max
+                _data_min, _data_max,
+                extra_col=(2.0, _legend_widget)
             )
 
             unique_model_count = len(final_df['Model Name'].unique())
@@ -403,12 +426,11 @@ with chart_col:
 
             apply_legend(fig_models, st.session_state.legend_mode, inside=True)
 
-            # Updated dynamic axes mapping using nticks logic
             fig_models.update_xaxes(
                 type="date",
-                tickmode="auto",           
-                tickformat="%b %d",        
-                nticks=90,                 
+                tickmode="auto",
+                tickformat="%b %d",
+                nticks=_nticks1,
                 tickangle=-40,
                 automargin=True,
                 range=[x_start, x_end],
@@ -429,9 +451,8 @@ with chart_col:
 
         # ── CHART 2: SUMMATION ────────────────────────────────────────────
         if view_mode in ["all", "summation"]:
-            st.title("KPI Summation")
-
-            x_start2, x_end2 = render_nav_row(
+            x_start2, x_end2, _nticks2 = inline_title_nav(
+                "KPI Summation",
                 "time_view2", "period_offset2", set_view2, "c2",
                 _data_min, _data_max
             )
@@ -460,12 +481,11 @@ with chart_col:
                 hoverlabel=dict(font_size=16, font_family="Arial", align="left", namelength=-1),
             )
             
-            # Updated dynamic axes mapping using nticks logic
             fig_sum.update_xaxes(
                 type="date",
                 tickmode="auto",
                 tickformat="%b %d",
-                nticks=90,
+                nticks=_nticks2,
                 tickangle=-40,
                 automargin=True,
                 range=[x_start2, x_end2],
