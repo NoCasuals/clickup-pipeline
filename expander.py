@@ -11,9 +11,9 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
 # --- CONFIGURATION ---
-GOOGLE_SHEET_URL  = "https://docs.google.com/spreadsheets/d/1RE039NcnPeQtQrvI5zjLyADzAr-ZseBPUq388SxkV-Y/edit?usp=sharing"
-KPI_INDEX_SHEET_URL = "https://docs.google.com/spreadsheets/d/1xJwiD1F_p6BFm4-sjEEZ0U1xCMqqUEU6TwQSUmQxW5s/edit"
-DRIVE_FOLDER_ID   = "1zHACpi08NE9D9tg5HTb_jbkjV6RpKI2v"
+GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1RE039NcnPeQtQrvI5zjLyADzAr-ZseBPUq388SxkV-Y/edit?usp=sharing"
+DRIVE_FOLDER_ID = "1zHACpi08NE9D9tg5HTb_jbkjV6RpKI2v"
+DIFFICULTY_LOOKUP_URL = "https://docs.google.com/spreadsheets/d/1xJwiD1F_p6BFm4-sjEEZ0U1xCMqqUEU6TwQSUmQxW5s/edit"
 
 def get_google_credentials():
     scopes = [
@@ -38,6 +38,44 @@ def execute_with_retry(func, *args, **kwargs):
                 raise e
         except Exception as e:
             raise e
+
+def load_difficulty_tiers(client, url):
+    """Fetches the lookup sheet and converts the threshold points into tier boundaries."""
+    try:
+        print(f" -> Downloading dynamic tier maps from: {url}")
+        sheet = client.open_by_url(url).sheet1
+        raw_rows = sheet.get_all_values()[1:]  # Safely drop header row
+        
+        parsed_rows = []
+        for row in raw_rows:
+            if not row or not row[0].strip():
+                continue
+            sqft_threshold = float(row[0].strip().replace(',', ''))
+            difficulty_val = float(row[1].strip())
+            parsed_rows.append((sqft_threshold, difficulty_val))
+            
+        # Sort by square footage threshold ascendingly to ensure accurate evaluations
+        parsed_rows.sort(key=lambda x: x[0])
+        
+        tiers = []
+        for i in range(len(parsed_rows)):
+            min_val = parsed_rows[i][0]
+            # Next row's threshold forms the exclusive upper limit. Last row goes to infinity.
+            max_val = parsed_rows[i+1][0] if i + 1 < len(parsed_rows) else float('inf')
+            difficulty_val = parsed_rows[i][1]
+            
+            tiers.append({"min": min_val, "max": max_val, "base_difficulty": difficulty_val})
+            
+        print(f" -> Successfully synthesized {len(tiers)} operational difficulty metrics.")
+        return tiers
+        
+    except Exception as e:
+        print(f" [!] Warning: Failed to read online scale rules. Falling back to code baseline standards. Error: {e}")
+        return [
+            {"min": 0, "max": 2500, "base_difficulty": 1.0},
+            {"min": 2500, "max": 4000, "base_difficulty": 1.5},
+            {"min": 4000, "max": float('inf'), "base_difficulty": 2.0}
+        ]
 
 def list_spreadsheets_in_folder(folder_id, service):
     """Scans the designated Google Drive folder and maps file names to their unique file IDs."""
@@ -67,7 +105,6 @@ def list_spreadsheets_in_folder(folder_id, service):
     return files_map
 
 def parse_number_sequence(seg):
-    """Helper to convert sequences like '1 to 8', '1-8', or '9, 10' into lists of integers."""
     seg = seg.upper()
     numbers = set()
     ranges = re.findall(r'(\d+)\s*(?:TO|-)\s*(\d+)', seg)
@@ -81,7 +118,6 @@ def parse_number_sequence(seg):
     return sorted(list(numbers))
 
 def parse_compound_suffixes(blob):
-    """Parses complex trailing model modifiers like '8 TO 10, 13E, 13EU, 14C, 15'."""
     blob = blob.upper()
     suffixes = []
     range_match = re.search(r'(\d+)\s*(?:TO|-)\s*(\d+)', blob)
@@ -97,7 +133,6 @@ def parse_compound_suffixes(blob):
     return suffixes
 
 def is_wildcard_numeric_match(allowed_model, norm_model_cell):
-    """Handles number wildcards like '6000S' or '36S' by searching for matching sequences."""
     if allowed_model.endswith('S'):
         base = allowed_model[:-1]
         if base.isdigit():
@@ -155,6 +190,7 @@ def extract_allowed_targets(task_name):
             else:
                 allowed_models.add(base_series)
 
+    # FIX: Restored closing brace token target configuration bounds {1,4}
     range_matches = re.findall(r'\b([A-Z-]{1,4})\s*-?\s*(\d+)\s*(?:TO|-)\s*(?:[A-Z-]{1,4}\s*-?\s*)?(\d+)\b', text_no_blocks)
     for series, start_str, end_str in range_matches:
         start, end = int(start_str), int(end_str)
@@ -165,23 +201,9 @@ def extract_allowed_targets(task_name):
             if start_str.startswith('0'):
                 add_model_target(series, str(i))
 
-    # Handle ranges where the series prefix is itself numeric, e.g.:
-    #   "36-01 TO 04"       → 36-01, 36-02, 36-03, 36-04
-    #   "36-01 TO 36-04"    → 36-01, 36-02, 36-03, 36-04
-    #   "40-01 TO 04"       → 40-01, 40-02, 40-03, 40-04
-    # Pattern: BASE(2-4 digits) - STARTNUM  TO  [BASE-]? ENDNUM
-    # We require at least 2 digits in each part so single-digit tokens
-    # (which the letter-series path already handles) are not double-processed.
-    numeric_prefix_ranges = re.findall(
-        r'\b(\d{2,4})-(\d{2,4})\s+TO\s+(?:\d{2,4}-)?(\d{2,4})\b',
-        text_no_blocks
-    )
+    numeric_prefix_ranges = re.findall(r'\b(\d{2,4})-(\d{2,4})\s+TO\s+(?:\d{2,4}-)?(\d{2,4})\b', text_no_blocks)
     for base, start_str, end_str in numeric_prefix_ranges:
         start, end = int(start_str), int(end_str)
-        # If end < start the author likely meant the suffix only (e.g. "36-01 TO 04"
-        # where 04 < 36). That is the normal case — expand suffix from start to end.
-        # Guard against obviously bad ranges (end much larger than start with no
-        # shared prefix context) by capping at 200 models per range.
         if start <= end and (end - start) <= 200:
             padding = len(start_str)
             for i in range(start, end + 1):
@@ -226,62 +248,18 @@ def extract_allowed_targets(task_name):
     return project_code, allowed_models, allowed_blocks, allowed_lots
 
 def parse_elevation_count(elevation_cell):
-    """Calculates clean integer elevation profiles, correcting un-slashed typos."""
     if not elevation_cell or str(elevation_cell).strip() in ["-", ""]:
         return 1
     el_str = str(elevation_cell).strip().upper()
-    
     if any(char in el_str for char in ['/', ',', '+', '&']):
         elements = re.split(r'[/,&+]', el_str)
         return len([e for e in elements if e.strip()])
-        
     if el_str.isalpha():
         return len(el_str)
-        
     return 1
 
-def load_difficulty_brackets(all_rows):
-    """
-    Reads the sq ft → difficulty bracket table from rows 2–4 of the KPI Index sheet.
-    Expected format:
-        Row 2:  "0-2500"    | 1
-        Row 3:  "2501-4000" | 1.5
-        Row 4:  "4001+"     | 2
-    Returns a list of (lo, hi, difficulty) tuples sorted by lo.
-    """
-    brackets = []
-    for row in all_rows[1:5]:   # sheet rows 2-4 (0-indexed 1-3), row 5 is blank
-        if len(row) < 2 or not row[0].strip() or not row[1].strip():
-            continue
-        range_str = row[0].strip().replace(',', '')
-        try:
-            diff_val = float(row[1].strip())
-        except ValueError:
-            continue
-        if '+' in range_str:
-            num_part = re.sub(r'[^0-9]', '', range_str)
-            if num_part:
-                brackets.append((float(num_part), float('inf'), diff_val))
-        elif '-' in range_str:
-            parts = range_str.split('-')
-            try:
-                brackets.append((float(parts[0].strip()), float(parts[1].strip()), diff_val))
-            except (ValueError, IndexError):
-                continue
-    brackets.sort(key=lambda x: x[0])
-    return brackets
-
-
-def calc_base_difficulty(sq_ft, brackets):
-    """Return the base difficulty for sq_ft using the loaded bracket table."""
-    for lo, hi, diff in brackets:
-        if lo <= sq_ft <= hi:
-            return diff
-    return brackets[-1][2] if brackets else 1.0
-
-
-def parse_sq_ft_and_difficulty(sq_ft_val, num_elevations, difficulty_brackets=None):
-    """Sanitizes square footage and assigns structural difficulty brackets."""
+def parse_sq_ft_and_difficulty(sq_ft_val, num_elevations, tiers):
+    """Assigns difficulty brackets mapping to structural threshold logic constraints."""
     s = str(sq_ft_val).upper().replace(",", "").strip()
     s_match = re.search(r'([\d/]+)', s)
     if not s_match:
@@ -293,17 +271,12 @@ def parse_sq_ft_and_difficulty(sq_ft_val, num_elevations, difficulty_brackets=No
         sq_ft = max(parts) if parts else 0
     else:
         sq_ft = float(val_part)
-
-    # Use dynamic brackets from KPI Index sheet when available; fall back to hardcoded.
-    if difficulty_brackets:
-        base_difficulty = calc_base_difficulty(sq_ft, difficulty_brackets)
-    else:
-        if sq_ft <= 2500:
-            base_difficulty = 1.0
-        elif sq_ft <= 4000:
-            base_difficulty = 1.5
-        else:
-            base_difficulty = 2.0
+        
+    base_difficulty = 1.0
+    for tier in tiers:
+        if tier["min"] <= sq_ft < tier["max"]:
+            base_difficulty = tier["base_difficulty"]
+            break
         
     elevation_bonus = max(0, (num_elevations - 1) * 0.1)
     difficulty = round(base_difficulty + elevation_bonus, 2)
@@ -331,11 +304,9 @@ def find_date_column_indices(schedule_data):
     return arch_idx, floor_idx, truss_idx
 
 def clean_and_parse_date(date_str):
-    """Helper to cleanly parse Excel date strings into explicit date objects."""
     if not date_str or date_str.strip() in ["", "NAN", "-", "NONE"]:
         return None
-    date_clean = date_str.split(" ")[0].strip()
-    date_clean = date_clean.replace("/", "-")
+    date_clean = date_str.split(" ")[0].strip().replace("/", "-")
     if re.match(r'^\d{4}-\d{2}-\d{2}', date_clean):
         try:
             return datetime.strptime(date_clean[:10], "%Y-%m-%d").date()
@@ -344,26 +315,17 @@ def clean_and_parse_date(date_str):
     return None
 
 def main():
-    print(f"[{datetime.now()}] Initializing Advanced Inline Upsert Engine with Balanced Loading metrics...")
+    print(f"[{datetime.now()}] Initializing Advanced Inline Upsert Engine...")
     creds = get_google_credentials()
     client = gspread.authorize(creds)
     drive_service = build('drive', 'v3', credentials=creds)
     
     try:
+        difficulty_tiers = load_difficulty_tiers(client, DIFFICULTY_LOOKUP_URL)
+        
         drive_files = list_spreadsheets_in_folder(DRIVE_FOLDER_ID, drive_service)
         master_workbook = client.open_by_url(GOOGLE_SHEET_URL)
-        log_sheet = master_workbook.sheet1
-
-        # --- KPI DIFFICULTY INDEX SHEET SETUP ---
-        print("\n[Loading KPI Difficulty Index Sheet]")
-        kpi_index_wb    = client.open_by_url(KPI_INDEX_SHEET_URL)
-        kpi_index_sheet = kpi_index_wb.sheet1
-        kpi_index_all   = execute_with_retry(kpi_index_sheet.get_all_values)
-
-        # Load dynamic sq ft → difficulty bracket table from rows 2-4
-        difficulty_brackets = load_difficulty_brackets(kpi_index_all)
-        print(f" -> Loaded {len(difficulty_brackets)} difficulty brackets.")
-
+        log_sheet = master_workbook.sheet1  
         all_log_rows = log_sheet.get_all_values()
         
         print("\nScanning rows and executing architectural upsert calculations...")
@@ -387,7 +349,6 @@ def main():
             if not matched_file_id:
                 continue
                 
-            # --- DEDUPLICATION SCAN PHASE ---
             existing_children = {}  
             scan_idx = idx + 1
             while scan_idx < len(all_log_rows):
@@ -402,17 +363,14 @@ def main():
                 
             try:
                 file_bytes = drive_service.files().get_media(fileId=matched_file_id).execute()
-                
                 wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
                 ws = wb.worksheets[0]
                 
                 for merged_range in list(ws.merged_cells.ranges):
                     min_row, max_row = merged_range.min_row, merged_range.max_row
                     min_col, max_col = merged_range.min_col, merged_range.max_col
-                    
                     top_left_value = ws.cell(row=min_row, column=min_col).value
                     ws.unmerge_cells(start_row=min_row, start_column=min_col, end_row=max_row, end_column=max_col)
-                    
                     for r in range(min_row, max_row + 1):
                         for c in range(min_col, max_col + 1):
                             ws.cell(row=r, column=c).value = top_left_value
@@ -423,23 +381,17 @@ def main():
                     schedule_data.append(clean_row)
                 
                 arch_idx, floor_idx, truss_idx = find_date_column_indices(schedule_data)
-                
                 subtask_compiled_matches = []
                 current_series = ""
                 
                 for s_row in schedule_data:
                     if len(s_row) < 5:
                         continue
-                        
                     series_cell = s_row[1].strip()
-                    model_cell = s_row[2].strip()
-                    
-                    if model_cell.endswith(".0"):
-                        model_cell = model_cell[:-2]
+                    model_cell = s_row[2].strip().replace(".0", "")
                         
                     if series_cell:
                         current_series = series_cell
-                        
                     if not model_cell:
                         continue
                         
@@ -498,15 +450,11 @@ def main():
                             sq_ft_output = ""
                             difficulty_output = "1"
                         else:
-                            sq_ft_output, difficulty_output = parse_sq_ft_and_difficulty(s_row[4], num_elevations, difficulty_brackets)
+                            sq_ft_output, difficulty_output = parse_sq_ft_and_difficulty(s_row[4], num_elevations, difficulty_tiers)
                             
                         arch_cell_str = s_row[arch_idx].strip() if arch_idx is not None and arch_idx < len(s_row) else ""
                         floor_cell_str = s_row[floor_idx].strip() if floor_idx is not None and floor_idx < len(s_row) else ""
                         truss_cell_str = s_row[truss_idx].strip() if truss_idx is not None and truss_idx < len(s_row) else ""
-                        
-                        arch_dt = clean_and_parse_date(arch_cell_str)
-                        floor_dt = clean_and_parse_date(floor_cell_str)
-                        truss_dt = clean_and_parse_date(truss_cell_str)
                         
                         subtask_compiled_matches.append({
                             "model_output": model_output,
@@ -514,13 +462,12 @@ def main():
                             "num_elevations": num_elevations,
                             "sq_ft_output": sq_ft_output,
                             "difficulty_output": difficulty_output,
-                            "arch_dt": arch_dt,
-                            "floor_dt": floor_dt,
-                            "truss_dt": truss_dt,
+                            "arch_dt": clean_and_parse_date(arch_cell_str),
+                            "floor_dt": clean_and_parse_date(floor_cell_str),
+                            "truss_dt": clean_and_parse_date(truss_cell_str),
                             "final_start_date": ""
                         })
 
-                # Step 2: Advanced Two-Pass Relational Scheduling Calculations
                 valid_model_dates = []
                 for item in subtask_compiled_matches:
                     if not item["is_block"]:
@@ -528,8 +475,6 @@ def main():
                             calc_date = max(item["arch_dt"], item["floor_dt"], item["truss_dt"]) + timedelta(days=1)
                             item["final_start_date"] = calc_date.strftime("%Y-%m-%d")
                             valid_model_dates.append(calc_date)
-                        else:
-                            item["final_start_date"] = ""  
 
                 max_subtask_model_date = max(valid_model_dates) if valid_model_dates else None
 
@@ -537,52 +482,34 @@ def main():
                     if item["is_block"]:
                         if item["arch_dt"] and item["truss_dt"]:
                             block_base_date = max(item["arch_dt"], item["truss_dt"]) + timedelta(days=1)
-                            if max_subtask_model_date and max_subtask_model_date > block_base_date:
-                                final_block_date = max_subtask_model_date
-                            else:
-                                final_block_date = block_base_date
+                            final_block_date = max_subtask_model_date if max_subtask_model_date and max_subtask_model_date > block_base_date else block_base_date
                             item["final_start_date"] = final_block_date.strftime("%Y-%m-%d")
-                        else:
-                            item["final_start_date"] = ""
 
-                # Step 3: Upsert Execution Phase
                 new_rows_to_insert = []
                 project_sheet_updates = []
                 seen_models_this_pass = set()
                 
                 for item in subtask_compiled_matches:
-                    model_output      = item["model_output"]
-                    num_elevations    = item["num_elevations"]
-                    sq_ft_output      = item["sq_ft_output"]
+                    model_output = item["model_output"]
                     difficulty_output = item["difficulty_output"]
                     start_date_output = item["final_start_date"]
-
-                    # Calculate Loading Quotient → Difficulty / Parent Duration (Col G)
+                    
                     try:
                         parent_col_g = float(row[6].strip()) if len(row) > 6 and row[6].strip() else 0
                         model_difficulty = float(difficulty_output) if difficulty_output else 0
-                        if parent_col_g != 0 and model_difficulty != 0:
-                            loading_quotient = round(model_difficulty / parent_col_g, 4)
-                        else:
-                            loading_quotient = ""
+                        loading_quotient = round(model_difficulty / parent_col_g, 4) if parent_col_g != 0 else ""
                     except Exception:
                         loading_quotient = ""
-
-                    # Target unique tracking code from Parent Task Row Column K
+                    
                     parent_col_k_str = row[10].strip() if len(row) > 10 else ""
-
-                    # Deduplicate array staging to eliminate dual updates
+                    
                     if model_output.upper() not in seen_models_this_pass:
                         seen_models_this_pass.add(model_output.upper())
                         project_sheet_updates.append({
                             "model_name": f"{project_code} - {model_output}",
                             "loading_quotient": loading_quotient,
                             "clickup_start_date": parent_col_k_str,
-                            # Duration lives only on the parent task row (Sheet 1 Col G) and
-                            # is assumed identical for every model/block beneath it.
                             "duration": row[6].strip() if len(row) > 6 else "",
-                            # Due date from Sheet 1 Col L — used to define the exact last
-                            # business day of the projection window in Sheet 2.
                             "clickup_due_date": row[11].strip() if len(row) > 11 else ""
                         })
                     
@@ -591,169 +518,77 @@ def main():
                         live_row_num = existing_children[model_lookup_key]
                         orig_child_row = all_log_rows[live_row_num - 1]
                         
-                        # Track cells directly across columns D through K safely
                         current_el = orig_child_row[3].strip() if len(orig_child_row) > 3 else ""
                         current_sq = orig_child_row[4].strip() if len(orig_child_row) > 4 else ""
                         current_diff = orig_child_row[5].strip() if len(orig_child_row) > 5 else ""
-                        current_g = orig_child_row[6].strip() if len(orig_child_row) > 6 else ""     # Col G
-                        current_h = orig_child_row[7].strip() if len(orig_child_row) > 7 else ""     # Col H
-                        current_i = orig_child_row[8].strip() if len(orig_child_row) > 8 else ""     # Col I
-                        current_j = orig_child_row[9].strip() if len(orig_child_row) > 9 else ""     # Col J
-                        current_k = orig_child_row[10].strip() if len(orig_child_row) > 10 else ""   # Col K
+                        current_h = orig_child_row[7].strip() if len(orig_child_row) > 7 else ""     
+                        current_j = orig_child_row[8].strip() if len(orig_child_row) > 8 else ""     
+                        current_k = orig_child_row[10].strip() if len(orig_child_row) > 10 else ""   
                         
-                        new_el_str = str(num_elevations)
-                        new_sq_str = str(sq_ft_output)
-                        new_diff_str = str(difficulty_output)
-                        new_g_str = ""
-                        new_h_str = str(loading_quotient)
-                        new_i_str = ""
-                        new_j_str = str(start_date_output)
-                        new_k_str = str(parent_col_k_str)
-                        
-                        # Bulk range push execution if metrics differ
-                        if (current_el != new_el_str or current_sq != new_sq_str or 
-                            current_diff != new_diff_str or current_g != new_g_str or 
-                            current_h != new_h_str or current_i != new_i_str or 
-                            current_j != new_j_str or current_k != new_k_str):
+                        if (current_el != str(item["num_elevations"]) or current_sq != str(item["sq_ft_output"]) or 
+                            current_diff != str(difficulty_output) or current_h != str(loading_quotient) or 
+                            current_j != str(start_date_output) or current_k != str(parent_col_k_str)):
                             
                             update_range = f"D{live_row_num}:K{live_row_num}"
-                            update_payload = [[new_el_str, new_sq_str, new_diff_str, new_g_str, new_h_str, new_i_str, new_j_str, new_k_str]]
-                            
-                            execute_with_retry(
-                                log_sheet.update,
-                                range_name=update_range,
-                                values=update_payload,
-                                value_input_option="USER_ENTERED"
-                            )
-                            print(f" [≠] UPSERT RANGE SYNC: Row {live_row_num} matrix synchronized for item '{model_output}'.")
+                            update_payload = [[str(item["num_elevations"]), str(item["sq_ft_output"]), str(difficulty_output), "", str(loading_quotient), "", str(start_date_output), str(parent_col_k_str)]]
+                            execute_with_retry(log_sheet.update, range_name=update_range, values=update_payload, value_input_option="USER_ENTERED")
                     else:
-                        # NEW GRID STRUCTURAL MAP:
-                        # A: Blank | B: Blank | C: Name | D: Elevations | E: Sq Ft | F: Difficulty 
-                        # G: Unused/Blank | H: Quotient | I: Unused/Blank | J: Theoretical Start Date | K: Parent Task Col K
-                        new_rows_to_insert.append([
-                            "",                             
-                            "",                             
-                            model_output,                     
-                            num_elevations,                 
-                            sq_ft_output,                   
-                            difficulty_output,              
-                            "",                             # Column G (Unused for Child Records)
-                            loading_quotient,               # Column H (Difficulty / Parent Column G)
-                            "",                             # Column I (Unused for Child Records)
-                            start_date_output,              # Column J (Theoretical Start Date)
-                            parent_col_k_str                # Column K (Inherited from Parent Task Row Column K)
-                        ])
+                        new_rows_to_insert.append(["", "", model_output, item["num_elevations"], item["sq_ft_output"], difficulty_output, "", loading_quotient, "", start_date_output, parent_col_k_str])
                 
                 if new_rows_to_insert:
-                    insertion_line = idx + 2
-                    execute_with_retry(
-                        log_sheet.insert_rows,
-                        new_rows_to_insert,
-                        row=insertion_line,
-                        value_input_option="USER_ENTERED"
-                    )
-                    print(f" [✔] INJECTED: Added {len(new_rows_to_insert)} balanced matrix rows under row {idx + 1}")
+                    execute_with_retry(log_sheet.insert_rows, new_rows_to_insert, row=idx + 2, value_input_option="USER_ENTERED")
                 
-                # --- UPGRADE FEATURE: CONSOLIDATED SINGLE-TAB LOG WRITER ---
+                # --- TAB 2 UPDATER (CONSOLIDATED TRACKING SWEEP) ---
                 if project_sheet_updates:
-                    try:
-                        # UPGRADE FIX: Targets the second tab sheet index [1] directly instead of project titles
-                        proj_sheet = master_workbook.worksheets()[1]
-                    except IndexError:
-                        # Safeguard fall-back if sheet 2 does not exist
-                        proj_sheet = execute_with_retry(
-                            master_workbook.add_worksheet,
-                            title="Consolidated Model Log",
-                            rows="2000",
-                            cols="5"
-                        )
-                        execute_with_retry(
-                            proj_sheet.append_row,
-                            ["Model Name", "Date", "Loading Quotient"],
-                            value_input_option="USER_ENTERED"
-                        )
-                    
+                    proj_sheet = master_workbook.worksheets()[1]
                     proj_rows = proj_sheet.get_all_values()
                     today_str = datetime.now().strftime("%Y-%m-%d")
 
-                    # Build a lookup of every existing Sheet 2 record:
-                    #   (MODEL NAME upper, date string) -> (1-based row number, current KPI string)
-                    # This lets us decide, per (model, day), whether an existing row needs
-                    # CHANGING or a brand-new row needs INSERTING. Rows are NEVER deleted.
                     existing_index = {}
                     for r_idx, r_cells in enumerate(proj_rows):
-                        if r_idx == 0:  # header row
-                            continue
+                        if r_idx == 0: continue
                         nm = r_cells[0].strip().upper() if len(r_cells) > 0 else ""
                         dt = r_cells[1].strip() if len(r_cells) > 1 else ""
                         kp = r_cells[2].strip() if len(r_cells) > 2 else ""
-                        if nm and dt:
-                            existing_index[(nm, dt)] = (r_idx + 1, kp)
+                        if nm and dt: existing_index[(nm, dt)] = (r_idx + 1, kp)
 
-                    pending_updates = []         # (row_number, new_kpi) — only when value differs
-                    rows_to_insert_at_top = []   # brand-new [model, date, kpi] rows
+                    pending_updates = []         
+                    rows_to_insert_at_top = []   
 
                     for p_update in project_sheet_updates:
                         full_name = p_update["model_name"]
                         lq_val = str(p_update["loading_quotient"])
-                        clickup_start_str = p_update.get("clickup_start_date", "")
-                        clickup_due_str   = p_update.get("clickup_due_date", "")
+                        clickup_start_dt = clean_and_parse_date(p_update.get("clickup_start_date", ""))
+                        clickup_due_dt   = clean_and_parse_date(p_update.get("clickup_due_date", ""))
 
-                        # Projection window = all business days in [start, due] inclusive.
-                        # Both bounds come directly from ClickUp (Col K = start, Col L = due),
-                        # so the last projected row in Sheet 2 always lands on the exact due date
-                        # regardless of how many business days that span contains.
-                        clickup_start_dt = clean_and_parse_date(clickup_start_str)
-                        clickup_due_dt   = clean_and_parse_date(clickup_due_str)
+                        for (nm, dt), (row_num, current_kpi) in list(existing_index.items()):
+                            if nm == full_name.upper():
+                                if current_kpi != lq_val:
+                                    pending_updates.append((row_num, lq_val))
+                                    existing_index[(nm, dt)] = (row_num, lq_val)
 
-                        # Current day is always included so an active task logs even if
-                        # its window has already elapsed or dates are missing.
                         dates_to_ensure = {today_str}
                         if clickup_start_dt and clickup_due_dt and clickup_due_dt >= clickup_start_dt:
-                            # pd.bdate_range(start, end) returns business days in [start, end] inclusive.
-                            # This lands the last Sheet 2 row exactly on the ClickUp due date.
                             for bd in pd.bdate_range(str(clickup_start_dt), str(clickup_due_dt)):
                                 dates_to_ensure.add(str(bd.date()))
 
-                        # Decide CHANGE vs INSERT for each date (past, present, projected future).
                         for day_str in sorted(dates_to_ensure):
                             key = (full_name.upper(), day_str)
-                            if key in existing_index:
-                                row_num, current_kpi = existing_index[key]
-                                # Only rewrite when the value actually differs. This is exactly
-                                # what corrects a future day that was projected earlier with a
-                                # now-outdated KPI (e.g. tomorrow's projected value, fixed when
-                                # tomorrow's run computes the real KPI).
-                                if current_kpi != lq_val:
-                                    pending_updates.append((row_num, lq_val))
-                                    existing_index[key] = (row_num, lq_val)
-                            else:
+                            if key not in existing_index:
                                 rows_to_insert_at_top.append([full_name, day_str, lq_val])
+                                existing_index[key] = (0, lq_val)
 
-                    # Apply CHANGES first, while the freshly-read row numbers are still valid.
-                    # (Inserts happen at row 2 and shift everything down, so they must follow.)
                     for row_num, new_kpi in pending_updates:
                         execute_with_retry(proj_sheet.update_cell, row_num, 3, new_kpi)
-                        print(f" [≠] CONSOLIDATED SHEET METRIC UPDATE: Row {row_num} re-synced to KPI {new_kpi}.")
+                        print(f" [≠] TAB 2 UPDATE: Row {row_num} synchronized to new baseline KPI {new_kpi}.")
 
-                    # Insert all new (model, date) rows — historical, current, and projected —
-                    # in a single batch at the top. Identical format to every other row.
                     if rows_to_insert_at_top:
-                        execute_with_retry(
-                            proj_sheet.insert_rows,
-                            rows_to_insert_at_top,
-                            row=2,
-                            value_input_option="USER_ENTERED"
-                        )
-                        print(f" [✔] CONSOLIDATED SHEET ENTRY INJECTION: Added {len(rows_to_insert_at_top)} "
-                              f"logged/projected KPI rows starting at Row 2.")
-
+                        execute_with_retry(proj_sheet.insert_rows, rows_to_insert_at_top, row=2, value_input_option="USER_ENTERED")
                     
             except Exception as inner_e:
                 print(f"     [!] Error processing row index {idx + 1}: {str(inner_e)}")
 
         print("\nSUCCESS: Multi-file structural matrix execution complete.")
-            
     except Exception as e:
         print(f"\nEngine Failed: {str(e)}")
 
