@@ -76,6 +76,7 @@ def load_data():
     return df
 
 df = load_data()
+today = datetime.date.today()
 
 # --- 4. STATE MANAGEMENT ---
 if "sidebar_is_open" not in st.session_state:
@@ -92,15 +93,24 @@ if 'saved_projects' not in st.session_state: st.session_state.saved_projects = [
 if 'saved_models'   not in st.session_state: st.session_state.saved_models   = []
 if 'saved_yscale'   not in st.session_state: st.session_state.saved_yscale   = "Linear"
 
-# Period navigation state
+# Period navigation state — Chart 1 (models)
 if 'time_view'      not in st.session_state: st.session_state.time_view      = "Month"
 if 'period_offset'  not in st.session_state: st.session_state.period_offset  = 0
+
+# Period navigation state — Chart 2 (summation)
+if 'time_view2'     not in st.session_state: st.session_state.time_view2     = "Month"
+if 'period_offset2' not in st.session_state: st.session_state.period_offset2 = 0
 
 # Reset offset whenever the view type changes
 def set_view(v):
     if st.session_state.time_view != v:
         st.session_state.time_view     = v
         st.session_state.period_offset = 0
+
+def set_view2(v):
+    if st.session_state.time_view2 != v:
+        st.session_state.time_view2     = v
+        st.session_state.period_offset2 = 0
 
 def get_period_bounds(view, offset, today):
     """Return (x_start, x_end) date objects for the chosen view + offset."""
@@ -294,7 +304,6 @@ def apply_legend(fig, mode, inside=True):
 
 # --- 8. VISUALIZATION ---
 view_mode = st.query_params.get("view", "all").lower()
-today = datetime.date.today()
 
 with chart_col:
     if final_df.empty:
@@ -396,6 +405,41 @@ with chart_col:
         # ── CHART 2: SUMMATION ────────────────────────────────────────────
         if view_mode in ["all", "summation"]:
             st.title("KPI Summation")
+
+            # Independent period nav for chart 2
+            _v2 = st.session_state.time_view2
+            _o2 = st.session_state.period_offset2
+            if _v2 == "All Time":
+                x_start2, x_end2 = _data_min - datetime.timedelta(days=1), _data_max + datetime.timedelta(days=1)
+                _can_prev2 = False
+                _can_next2 = False
+            else:
+                x_start2, x_end2 = get_period_bounds(_v2, _o2, today)
+                prev_s2, prev_e2 = get_period_bounds(_v2, _o2 - 1, today)
+                _can_prev2 = prev_e2 >= _data_min
+                next_s2, next_e2 = get_period_bounds(_v2, _o2 + 1, today)
+                _can_next2 = next_s2 <= _data_max
+
+            s2_mo, s2_wk, s2_qtr, s2_all, s2_prev, s2_next = st.columns(
+                [0.7, 0.65, 0.85, 0.9, 0.6, 0.6], gap="small"
+            )
+            with s2_mo:
+                if st.button("📅 Month",    key="s2_mo",  type="primary" if _v2=="Month"    else "secondary"): set_view2("Month")
+            with s2_wk:
+                if st.button("📅 Week",     key="s2_wk",  type="primary" if _v2=="Week"     else "secondary"): set_view2("Week")
+            with s2_qtr:
+                if st.button("📅 Quarter",  key="s2_qtr", type="primary" if _v2=="Quarter"  else "secondary"): set_view2("Quarter")
+            with s2_all:
+                if st.button("📅 All Time", key="s2_all", type="primary" if _v2=="All Time" else "secondary"): set_view2("All Time")
+            with s2_prev:
+                if st.button("◀ Prev", key="s2_prev", disabled=not _can_prev2):
+                    st.session_state.period_offset2 -= 1
+                    st.rerun()
+            with s2_next:
+                if st.button("Next ▶", key="s2_next", disabled=not _can_next2):
+                    st.session_state.period_offset2 += 1
+                    st.rerun()
+
             sum_df  = final_df.groupby("Date", as_index=False)["KPI"].sum()
             fig_sum = px.line(sum_df, x="Date", y="KPI", markers=True, height=calculated_height)
             fig_sum.update_traces(
@@ -428,7 +472,7 @@ with chart_col:
                 nticks=90,
                 tickangle=-40,
                 automargin=True,
-                range=[x_start, x_end],
+                range=[x_start2, x_end2],
                 rangeslider=dict(visible=False),
             )
             
