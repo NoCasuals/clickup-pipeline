@@ -135,6 +135,7 @@ def main():
         if progression_status == "FIRST MARKUP" and native_status == "TIMELINE" and re.match(r'^D\d{6}', name):
             duration_val = ""
             start_date_str = ""
+            due_date_str = ""
             start_date_ms = task.get("start_date")
             due_date_ms = task.get("due_date")
 
@@ -150,10 +151,14 @@ def main():
                 except Exception:
                     pass
 
+            # Format and capture the ClickUp due date string (Eastern time)
+            if due_date_ms:
+                try:
+                    due_date_str = ms_to_eastern_date(due_date_ms).strftime("%Y-%m-%d")
+                except Exception:
+                    pass
+
             # Calculate duration in BUSINESS DAYS (Mon–Fri only, no weekends).
-            # numpy.busday_count(start, end) counts weekdays in [start, end).
-            # We add 1 to make the range inclusive of the end date, matching
-            # how ClickUp displays the span.
             if due_date_ms and start_date_ms:
                 try:
                     start_date_obj = ms_to_eastern_date(start_date_ms)
@@ -163,8 +168,9 @@ def main():
                     pass
                     
             active_first_markup_tasks[name] = {
-                "duration": duration_val,
-                "start_date": start_date_str
+                "duration":   duration_val,
+                "start_date": start_date_str,
+                "due_date":   due_date_str
             }
 
     print(f" -> Found {len(active_first_markup_tasks)} items matching [Status: TIMELINE], [Progression: FIRST MARKUP], and [Naming Code: D######].")
