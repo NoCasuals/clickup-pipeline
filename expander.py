@@ -316,7 +316,6 @@ def parse_elevation_count(elevation_cell):
         return len(el_str)
     return 1
 
-# --- RESTORED: Dynamic Matrix Bracket Mapping Routine ---
 def parse_sq_ft_and_difficulty(sq_ft_val, num_elevations, tiers):
     """
     Maps the square footage value to the dynamically loaded difficulty tiers
@@ -392,8 +391,40 @@ def main():
         drive_files = list_spreadsheets_in_folder(DRIVE_FOLDER_ID, drive_service)
         master_workbook = client.open_by_url(GOOGLE_SHEET_URL)
         log_sheet = master_workbook.sheet1  
-        all_log_rows = log_sheet.get_all_values()
         
+        # --- AUTOMATED DATA PURGE PROTOCOL (SHEET 1) ---
+        print(" -> Scanning Sheet 1 for legacy header row duplicates...")
+        all_log_rows = log_sheet.get_all_values()
+        sheet1_purge_indices = []
+        for r_idx, r_data in enumerate(all_log_rows):
+            if len(r_data) > 2:
+                model_col_text = re.sub(r'[^A-Z]', '', r_data[2].strip().upper())
+                if model_col_text == "MODEL":
+                    sheet1_purge_indices.append(r_idx + 1)
+        
+        if sheet1_purge_indices:
+            print(f" [!] Purging {len(sheet1_purge_indices)} incorrect structural rows from Sheet 1...")
+            for row_num in sorted(sheet1_purge_indices, reverse=True):
+                execute_with_retry(log_sheet.delete_rows, row_num)
+            all_log_rows = log_sheet.get_all_values()
+
+        # --- AUTOMATED DATA PURGE PROTOCOL (SHEET 2) ---
+        print(" -> Scanning Sheet 2 (Consolidated Log) for corrupt entries...")
+        proj_sheet = master_workbook.worksheets()[1]
+        proj_rows = proj_sheet.get_all_values()
+        sheet2_purge_indices = []
+        for r_idx, r_data in enumerate(proj_rows):
+            if len(r_data) > 0:
+                normalized_name = r_data[0].strip().upper()
+                if normalized_name.endswith(" - MODEL") or normalized_name == "MODEL":
+                    sheet2_purge_indices.append(r_idx + 1)
+                    
+        if sheet2_purge_indices:
+            print(f" [!] Purging {len(sheet2_purge_indices)} corrupt historical series items from Sheet 2...")
+            for row_num in sorted(sheet2_purge_indices, reverse=True):
+                execute_with_retry(proj_sheet.delete_rows, row_num)
+            proj_rows = proj_sheet.get_all_values()
+
         print("\nScanning rows and executing architectural upsert calculations...")
         for idx in range(len(all_log_rows) - 1, 0, -1):
             row = all_log_rows[idx]
@@ -432,7 +463,6 @@ def main():
                 wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
                 ws = wb.worksheets[0]
                 
-                # Normalize workbook alignment maps across block configurations
                 for merged_range in list(ws.merged_cells.ranges):
                     min_row, max_row = merged_range.min_row, merged_range.max_row
                     min_col, max_col = merged_range.min_col, merged_range.max_col
@@ -451,21 +481,19 @@ def main():
                 subtask_compiled_matches = []
                 
                 for s_row_idx, s_row in enumerate(schedule_data):
-                    if len(s_row) < 5:
-                        continue
-                    if s_row_idx == 1:
+                    if len(s_row) < 5 or s_row_idx == 1:
                         continue
 
                     series_cell = s_row[1].strip()
                     model_cell = s_row[2].strip().replace(".0", "")
 
-                    if model_cell.upper() in ("MODEL", "MODEL NAME", "SERIES", "DESCRIPTION"):
+                    # Comprehensive filtering to prevent text components or section breaks from evaluation
+                    normalized_model_check = re.sub(r'[^A-Z]', '', model_cell.upper())
+                    if normalized_model_check in ("MODEL", "MODELNAME", "SERIES", "DESCRIPTION") or not model_cell:
                         continue
                         
                     if series_cell:
                         current_series = series_cell
-                    if not model_cell:
-                        continue
                         
                     model_upper = model_cell.upper()
                     norm_model_cell = re.sub(r'[^A-Z0-9]', '', model_upper)
@@ -653,9 +681,14 @@ def main():
                                 rows_to_insert_at_top.append([full_name, day_str, lq_val])
                                 existing_index[key] = (0, lq_val)
 
+                    # --- FIXED: Convert scattered cells to a native Cell object list for batch single-call submission ---
+                    cells_to_update = []
                     for row_num, new_kpi in pending_updates:
-                        execute_with_retry(proj_sheet.update_cell, row_num, 3, new_kpi)
-                        print(f" [≠] TAB 2 UPDATE: Row {row_num} synchronized to new baseline KPI {new_kpi}.")
+                        cells_to_update.append(gspread.cell.Cell(row=row_num, col=3, value=new_kpi))
+
+                    if cells_to_update:
+                        execute_with_retry(proj_sheet.update_cells, cells_to_update, value_input_option="USER_ENTERED")
+                        print(f" [≠] TAB 2 UPDATE: Batched synchronization complete for {len(cells_to_update)} records.")
 
                     if rows_to_insert_at_top:
                         execute_with_retry(proj_sheet.insert_rows, rows_to_insert_at_top, row=2, value_input_option="USER_ENTERED")
