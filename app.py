@@ -339,6 +339,8 @@ with chart_col:
             x_start, x_end, _nticks1 = inline_title_nav("KPI per Model Over Time", "time_view", "period_offset", set_view, "c1", _data_min, _data_max, extra_col=(2.0, _legend_widget))
 
             plot_df = final_df.copy()
+            # Explicitly cast to pandas datetime timestamps to ensure rangebreaks do not drop valid data series
+            plot_df['Date'] = pd.to_datetime(plot_df['Date'])
             plot_df['Display KPI'] = plot_df['KPI']
             if st.session_state.saved_jitter:
                 kpi_range = max(plot_df["KPI"].max() - plot_df["KPI"].min(), 0.01)
@@ -358,8 +360,8 @@ with chart_col:
             apply_legend(fig_models, st.session_state.legend_mode, inside=True)
             _tick_kwargs1 = dict(tickmode="auto", nticks=20) if st.session_state.time_view == "All Time" else dict(tickmode="linear", dtick=86400000)
             
-            # Formatted x-axis to collapse weekend visual gaps completely
-            fig_models.update_xaxes(type="date", tickformat="%b %d", tickangle=-40, automargin=True, range=[x_start, x_end], rangeslider_visible=False, rangebreaks=[dict(bounds=["sat", "mon"])], **_tick_kwargs1)
+            # Formatted x-axis with exact ISO bounds to collapse weekend gaps cleanly
+            fig_models.update_xaxes(type="date", tickformat="%b %d", tickangle=-40, automargin=True, range=[str(x_start), str(x_end)], rangeslider_visible=False, rangebreaks=[dict(bounds=["sat", "mon"])], **_tick_kwargs1)
             fig_models.update_yaxes(automargin=True, type="log" if _yscale_resolved == "Log" else "linear", rangemode="tozero" if _yscale_resolved == "From Zero" else "normal", zeroline=False)
             st.plotly_chart(fig_models, width='stretch')
 
@@ -375,6 +377,8 @@ with chart_col:
             x_start3, x_end3, _nticks3 = inline_title_nav("Raw KPI per Model Over Time", "time_view2", "period_offset2", set_view2, "c3", _data_min, _data_max, extra_col=(2.0, _legend_widget3))
 
             plot_df_flat = final_df_flat.copy()
+            # Explicitly cast to pandas datetime timestamps to ensure rangebreaks do not drop valid data series
+            plot_df_flat['Date'] = pd.to_datetime(plot_df_flat['Date'])
             plot_df_flat['Display KPI'] = plot_df_flat['KPI']
             if st.session_state.saved_jitter:
                 kpi_range3 = max(plot_df_flat["KPI"].max() - plot_df_flat["KPI"].min(), 0.01)
@@ -394,8 +398,8 @@ with chart_col:
             apply_legend(fig_models3, st.session_state.legend_mode3, inside=True)
             _tick_kwargs3 = dict(tickmode="auto", nticks=20) if st.session_state.time_view2 == "All Time" else dict(tickmode="linear", dtick=86400000)
             
-            # Formatted x-axis to collapse weekend visual gaps completely
-            fig_models3.update_xaxes(type="date", tickformat="%b %d", tickangle=-40, automargin=True, range=[x_start3, x_end3], rangeslider_visible=False, rangebreaks=[dict(bounds=["sat", "mon"])], **_tick_kwargs3)
+            # Formatted x-axis with exact ISO bounds to collapse weekend gaps cleanly
+            fig_models3.update_xaxes(type="date", tickformat="%b %d", tickangle=-40, automargin=True, range=[str(x_start3), str(x_end3)], rangeslider_visible=False, rangebreaks=[dict(bounds=["sat", "mon"])], **_tick_kwargs3)
             fig_models3.update_yaxes(automargin=True, type="log" if _yscale_resolved == "Log" else "linear", rangemode="tozero" if _yscale_resolved == "From Zero" else "normal", zeroline=False)
             st.plotly_chart(fig_models3, width='stretch')
 
@@ -407,6 +411,10 @@ with chart_col:
 
             sum_df = final_df.groupby("Date", as_index=False)["KPI"].sum()
             sum_df_flat = final_df_flat.groupby("Date", as_index=False)["KPI"].sum()
+            
+            # Explicitly cast layout datasets to standard pandas datetime timestamps
+            sum_df['Date'] = pd.to_datetime(sum_df['Date'])
+            sum_df_flat['Date'] = pd.to_datetime(sum_df_flat['Date'])
 
             fig_sum = go.Figure()
             fig_sum.add_trace(go.Scatter(
@@ -420,9 +428,9 @@ with chart_col:
                 connectgaps=True, hovertemplate="<b>📅 Date:</b> %{x}<br><b>📈 KPI (Raw):</b> %{y:.4f}<br><extra></extra>"
             ))
 
-            # Stretched layout height by more than double to optimally utilize layout space within the iframe embed
+            # Adjusted vertical proportion modifier slightly above baseline (1.15x) to eliminate whitespace bugs without extreme stretching
             fig_sum.update_layout(
-                height=int(calculated_height * 2.2),
+                height=int(calculated_height * 1.15),
                 xaxis_title="<b>Date</b>", yaxis_title="<b>Total KPI</b>", showlegend=True, margin=dict(l=85, r=20, t=50, b=110), hovermode="closest", font=dict(size=13),
                 xaxis_title_font=dict(size=20, family="Arial-Bold, Arial"), yaxis_title_font=dict(size=20, family="Arial-Bold, Arial"), hoverlabel=dict(font_size=16, font_family="Arial", align="left", namelength=-1),
                 legend=dict(x=0.01, y=0.99, xanchor="left", yanchor="top", bgcolor="rgba(20,20,20,0.82)", bordercolor="rgba(180,180,180,0.35)", borderwidth=1, font=dict(size=13), itemsizing="constant")
@@ -430,7 +438,7 @@ with chart_col:
             
             _tick_kwargs2 = dict(tickmode="auto", nticks=20) if st.session_state.time_view2 == "All Time" else dict(tickmode="linear", dtick=86400000)
             
-            # Removed weekend date ranges entirely from the x-axis timeline display using rangebreaks
-            fig_sum.update_xaxes(type="date", tickformat="%b %d", tickangle=-40, automargin=True, range=[x_start2, x_end2], rangeslider_visible=False, rangebreaks=[dict(bounds=["sat", "mon"])], **_tick_kwargs2)
+            # Formatted x-axis with exact ISO bounds to collapse weekend gaps cleanly
+            fig_sum.update_xaxes(type="date", tickformat="%b %d", tickangle=-40, automargin=True, range=[str(x_start2), str(x_end2)], rangeslider_visible=False, rangebreaks=[dict(bounds=["sat", "mon"])], **_tick_kwargs2)
             fig_sum.update_yaxes(automargin=True, type="log" if _yscale_resolved == "Log" else "linear", rangemode="tozero" if _yscale_resolved == "From Zero" else "normal", zeroline=False)
             st.plotly_chart(fig_sum, width='stretch')
