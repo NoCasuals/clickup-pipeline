@@ -430,5 +430,3 @@ with chart_col:
             fig_sum.update_xaxes(type="date", tickformat="%b %d", tickangle=-40, automargin=True, range=[x_start2, x_end2], rangeslider_visible=False, **_tick_kwargs2)
             fig_sum.update_yaxes(automargin=True, type="log" if _yscale_resolved == "Log" else "linear", rangemode="tozero" if _yscale_resolved == "From Zero" else "normal", zeroline=False)
             st.plotly_chart(fig_sum, width='stretch')
-
-}
