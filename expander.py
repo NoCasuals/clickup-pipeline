@@ -66,13 +66,11 @@ def load_difficulty_tiers(client, url):
             difficulty_val = float(row[1].strip())
             parsed_rows.append((sqft_threshold, difficulty_val))
             
-        # Sort thresholds in ascending order for boundary grouping
         parsed_rows.sort(key=lambda x: x[0])
         
         tiers = []
         for i in range(len(parsed_rows)):
             min_val = parsed_rows[i][0]
-            # The next row's lower bound establishes an exclusive upper limit for the current tier
             max_val = parsed_rows[i+1][0] if i + 1 < len(parsed_rows) else float('inf')
             difficulty_val = parsed_rows[i][1]
             
@@ -216,7 +214,6 @@ def extract_allowed_targets(task_name):
             else:
                 allowed_models.add(base_series)
 
-    # Letter-series range configuration pattern mapping
     range_matches = re.findall(r'\b([A-Z-]{1,4})\s*-?\s*(\d+)\s*(?:TO|-)\s*(?:[A-Z-]{1,4}\s*-?\s*)?(\d+)\b', text_no_blocks)
     for series, start_str, end_str in range_matches:
         start, end = int(start_str), int(end_str)
@@ -227,7 +224,6 @@ def extract_allowed_targets(task_name):
             if start_str.startswith('0'):
                 add_model_target(series, str(i))
 
-    # Comprehensive digit-prefix continuous block evaluator
     for pfx_m in re.finditer(r'\b(\d{2,4})-(\d+)', text_no_blocks):
         base      = pfx_m.group(1)
         first_num = pfx_m.group(2)
@@ -292,7 +288,6 @@ def extract_allowed_targets(task_name):
             allowed_models.add(token[:-1])
             allowed_models.add(token[:-1].replace('-', ''))
 
-    # Exclude system headers and generic text from matching matrix targets
     _non_model_words = {
         "MODEL", "MODELS", "PRIORITY", "REVIEW", "FIRST", "SECOND", "THIRD",
         "AND", "THE", "FOR", "WITH", "TO", "OR", "OF", "A", "AN", "IN",
@@ -408,7 +403,7 @@ def main():
                 execute_with_retry(log_sheet.delete_rows, row_num)
             all_log_rows = log_sheet.get_all_values()
 
-        # --- AUTOMATED DATA PURGE PROTOCOL (SHEET 2) ---
+        # --- AUTOMATED DATA PURGE PROTOCOL (SHEET 2 - WEIGHTED) ---
         print(" -> Scanning Sheet 2 (Consolidated Log) for corrupt entries...")
         proj_sheet = master_workbook.worksheets()[1]
         proj_rows = proj_sheet.get_all_values()
@@ -424,6 +419,23 @@ def main():
             for row_num in sorted(sheet2_purge_indices, reverse=True):
                 execute_with_retry(proj_sheet.delete_rows, row_num)
             proj_rows = proj_sheet.get_all_values()
+
+        # --- UPDATED: AUTOMATED DATA PURGE PROTOCOL (SHEET 3 - UNWEIGHTED FLAT) ---
+        print(" -> Scanning Sheet 3 (Flat Log) for corrupt entries...")
+        flat_sheet = master_workbook.worksheets()[2]
+        flat_rows = flat_sheet.get_all_values()
+        sheet3_purge_indices = []
+        for r_idx, r_data in enumerate(flat_rows):
+            if len(r_data) > 0:
+                normalized_name = r_data[0].strip().upper()
+                if normalized_name.endswith(" - MODEL") or normalized_name == "MODEL":
+                    sheet3_purge_indices.append(r_idx + 1)
+                    
+        if sheet3_purge_indices:
+            print(f" [!] Purging {len(sheet3_purge_indices)} corrupt historical series items from Sheet 3...")
+            for row_num in sorted(sheet3_purge_indices, reverse=True):
+                execute_with_retry(flat_sheet.delete_rows, row_num)
+            flat_rows = flat_sheet.get_all_values()
 
         print("\nScanning rows and executing architectural upsert calculations...")
         for idx in range(len(all_log_rows) - 1, 0, -1):
@@ -487,7 +499,6 @@ def main():
                     series_cell = s_row[1].strip()
                     model_cell = s_row[2].strip().replace(".0", "")
 
-                    # Comprehensive filtering to prevent text components or section breaks from evaluation
                     normalized_model_check = re.sub(r'[^A-Z]', '', model_cell.upper())
                     if normalized_model_check in ("MODEL", "MODELNAME", "SERIES", "DESCRIPTION") or not model_cell:
                         continue
@@ -598,8 +609,12 @@ def main():
                         parent_col_g = float(row[6].strip()) if len(row) > 6 and row[6].strip() else 0
                         model_difficulty = float(difficulty_output) if difficulty_output else 0
                         loading_quotient = round(model_difficulty / parent_col_g, 4) if parent_col_g != 0 else ""
+                        
+                        # UPDATED: Computes unweighted loading metric allocation payload (1 / duration)
+                        flat_loading_quotient = round(1.0 / parent_col_g, 4) if parent_col_g != 0 else ""
                     except Exception:
                         loading_quotient = ""
+                        flat_loading_quotient = ""
                     
                     parent_col_k_str = row[10].strip() if len(row) > 10 else ""
                     
@@ -608,6 +623,7 @@ def main():
                         project_sheet_updates.append({
                             "model_name": f"{project_code} - {model_output}",
                             "loading_quotient": loading_quotient,
+                            "flat_loading_quotient": flat_loading_quotient,
                             "clickup_start_date": parent_col_k_str,
                             "duration": row[6].strip() if len(row) > 6 else "",
                             "clickup_due_date": row[11].strip() if len(row) > 11 else ""
@@ -638,12 +654,17 @@ def main():
                 if new_rows_to_insert:
                     execute_with_retry(log_sheet.insert_rows, new_rows_to_insert, row=idx + 2, value_input_option="USER_ENTERED")
                 
-                # --- TAB 2 UPDATER (CONSOLIDATED TRACKING SWEEP) ---
+                # --- UPDATED: DATA ROUTING TRACKING SWEEP FOR SHEET 2 & SHEET 3 ---
                 if project_sheet_updates:
                     proj_sheet = master_workbook.worksheets()[1]
                     proj_rows = proj_sheet.get_all_values()
+                    
+                    flat_sheet = master_workbook.worksheets()[2]
+                    flat_rows = flat_sheet.get_all_values()
+                    
                     today_str = datetime.now().strftime("%Y-%m-%d")
 
+                    # Map Sheet 2 current matrix allocations
                     existing_index = {}
                     for r_idx, r_cells in enumerate(proj_rows):
                         if r_idx == 0: continue
@@ -652,15 +673,29 @@ def main():
                         kp = r_cells[2].strip() if len(r_cells) > 2 else ""
                         if nm and dt: existing_index[(nm, dt)] = (r_idx + 1, kp)
 
+                    # Map Sheet 3 current matrix allocations
+                    flat_existing_index = {}
+                    for r_idx, r_cells in enumerate(flat_rows):
+                        if r_idx == 0: continue
+                        nm = r_cells[0].strip().upper() if len(r_cells) > 0 else ""
+                        dt = r_cells[1].strip() if len(r_cells) > 1 else ""
+                        kp = r_cells[2].strip() if len(r_cells) > 2 else ""
+                        if nm and dt: flat_existing_index[(nm, dt)] = (r_idx + 1, kp)
+
                     pending_updates = []         
                     rows_to_insert_at_top = []   
+                    
+                    flat_pending_updates = []
+                    flat_rows_to_insert_at_top = []
 
                     for p_update in project_sheet_updates:
                         full_name        = p_update["model_name"]
                         lq_val           = str(p_update["loading_quotient"])
+                        flat_lq_val      = str(p_update["flat_loading_quotient"])
                         clickup_start_dt = clean_and_parse_date(p_update.get("clickup_start_date", ""))
                         clickup_due_dt   = clean_and_parse_date(p_update.get("clickup_due_date", ""))
 
+                        # Sweep Sheet 2 for required weighted metric synchronizations
                         for (nm, dt), index_val in list(existing_index.items()):
                             if not isinstance(index_val, tuple) or len(index_val) < 2:
                                 continue
@@ -670,6 +705,16 @@ def main():
                                     pending_updates.append((row_num, lq_val))
                                     existing_index[(nm, dt)] = (row_num, lq_val)
 
+                        # Sweep Sheet 3 for required unweighted flat metric synchronizations
+                        for (nm, dt), index_val in list(flat_existing_index.items()):
+                            if not isinstance(index_val, tuple) or len(index_val) < 2:
+                                continue
+                            row_num, current_kpi = index_val
+                            if nm == full_name.upper():
+                                if current_kpi != flat_lq_val:
+                                    flat_pending_updates.append((row_num, flat_lq_val))
+                                    flat_existing_index[(nm, dt)] = (row_num, flat_lq_val)
+
                         dates_to_ensure = {today_str}
                         if clickup_start_dt and clickup_due_dt and clickup_due_dt >= clickup_start_dt:
                             for bd in pd.bdate_range(str(clickup_start_dt), str(clickup_due_dt)):
@@ -677,11 +722,18 @@ def main():
 
                         for day_str in sorted(dates_to_ensure):
                             key = (full_name.upper(), day_str)
+                            
+                            # Append logic for missing intervals on Sheet 2
                             if key not in existing_index:
                                 rows_to_insert_at_top.append([full_name, day_str, lq_val])
                                 existing_index[key] = (0, lq_val)
+                                
+                            # Append logic for missing intervals on Sheet 3
+                            if key not in flat_existing_index:
+                                flat_rows_to_insert_at_top.append([full_name, day_str, flat_lq_val])
+                                flat_existing_index[key] = (0, flat_lq_val)
 
-                    # --- FIXED: Convert scattered cells to a native Cell object list for batch single-call submission ---
+                    # --- EXECUTE SHEET 2 COMMITS (BATCHED SINGLE-CALL API PASS) ---
                     cells_to_update = []
                     for row_num, new_kpi in pending_updates:
                         cells_to_update.append(gspread.cell.Cell(row=row_num, col=3, value=new_kpi))
@@ -692,6 +744,18 @@ def main():
 
                     if rows_to_insert_at_top:
                         execute_with_retry(proj_sheet.insert_rows, rows_to_insert_at_top, row=2, value_input_option="USER_ENTERED")
+
+                    # --- EXECUTE SHEET 3 COMMITS (BATCHED SINGLE-CALL API PASS) ---
+                    flat_cells_to_update = []
+                    for row_num, new_kpi in flat_pending_updates:
+                        flat_cells_to_update.append(gspread.cell.Cell(row=row_num, col=3, value=new_kpi))
+
+                    if flat_cells_to_update:
+                        execute_with_retry(flat_sheet.update_cells, flat_cells_to_update, value_input_option="USER_ENTERED")
+                        print(f" [≠] TAB 3 UPDATE: Batched synchronization complete for {len(flat_cells_to_update)} records.")
+
+                    if flat_rows_to_insert_at_top:
+                        execute_with_retry(flat_sheet.insert_rows, flat_rows_to_insert_at_top, row=2, value_input_option="USER_ENTERED")
                     
             except Exception as inner_e:
                 print(f"     [!] Error processing row index {idx + 1}: {str(inner_e)}")
