@@ -358,7 +358,14 @@ with chart_col:
             apply_legend(fig_models, st.session_state.legend_mode, inside=True)
             _tick_kwargs1 = dict(tickmode="auto", nticks=20) if st.session_state.time_view == "All Time" else dict(tickmode="linear", dtick=86400000)
             
-            fig_models.update_xaxes(type="date", tickformat="%b %d", tickangle=-40, automargin=True, range=[x_start, x_end], rangeslider_visible=False, **_tick_kwargs1)
+            # rangebreaks collapses Saturday–Sunday from the axis entirely, so ticks jump
+            # directly from Friday to Monday with no gap or phantom weekend columns
+            fig_models.update_xaxes(
+                type="date", tickformat="%b %d", tickangle=-40, automargin=True,
+                range=[x_start, x_end], rangeslider_visible=False,
+                rangebreaks=[dict(bounds=["sat", "mon"])],
+                **_tick_kwargs1
+            )
             fig_models.update_yaxes(automargin=True, type="log" if _yscale_resolved == "Log" else "linear", rangemode="tozero" if _yscale_resolved == "From Zero" else "normal", zeroline=False)
             st.plotly_chart(fig_models, width='stretch')
 
@@ -394,8 +401,14 @@ with chart_col:
             apply_legend(fig_models3, st.session_state.legend_mode3, inside=True)
             _tick_kwargs3 = dict(tickmode="auto", nticks=20) if st.session_state.time_view2 == "All Time" else dict(tickmode="linear", dtick=86400000)
             
-            # Formatted x-axes and rangesliders explicitly to match the KPI Summation configuration layout
-            fig_models3.update_xaxes(type="date", tickformat="%b %d", tickangle=-40, automargin=True, range=[x_start3, x_end3], rangeslider_visible=False, **_tick_kwargs3)
+            # Formatted x-axes and rangesliders explicitly to match the KPI Summation configuration layout;
+            # rangebreaks applied consistently across all three charts to suppress weekend tick marks
+            fig_models3.update_xaxes(
+                type="date", tickformat="%b %d", tickangle=-40, automargin=True,
+                range=[x_start3, x_end3], rangeslider_visible=False,
+                rangebreaks=[dict(bounds=["sat", "mon"])],
+                **_tick_kwargs3
+            )
             fig_models3.update_yaxes(automargin=True, type="log" if _yscale_resolved == "Log" else "linear", rangemode="tozero" if _yscale_resolved == "From Zero" else "normal", zeroline=False)
             st.plotly_chart(fig_models3, width='stretch')
 
@@ -420,9 +433,9 @@ with chart_col:
                 connectgaps=True, hovertemplate="<b>📅 Date:</b> %{x}<br><b>📈 KPI (Raw):</b> %{y:.4f}<br><extra></extra>"
             ))
 
-            # Summation chart rendered at ~2.3x the per-model chart height to reduce vertical whitespace
-            # and give the dual KPI lines adequate breathing room within the embed viewport
-            sum_chart_height = int((calculated_height - 10) * 2.3)
+            # Summation chart rendered at ~1.15x the per-model chart height to provide modest
+            # additional vertical room for the dual KPI lines without excessive empty space
+            sum_chart_height = int((calculated_height - 10) * 1.15)
 
             fig_sum.update_layout(
                 xaxis_title="<b>Date</b>", yaxis_title="<b>Total KPI</b>", showlegend=True,
