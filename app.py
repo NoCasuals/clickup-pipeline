@@ -345,12 +345,18 @@ with chart_col:
                 jitter_scale = kpi_range * 0.008
                 plot_df["Display KPI"] = plot_df["KPI"] + plot_df.groupby(["Date", "KPI"]).cumcount() * jitter_scale
 
-            fig_models = px.line(plot_df, x="Date", y="Display KPI", color="Model Name", markers=True, height=calculated_height - 10, custom_data=["Model Name", "KPI", "Overlapping Models", "Overlap Count"])
+            # Build via px.line to leverage automatic per-model color cycling, then transfer
+            # traces into an explicit go.Figure; px-native figures have an internal rendering
+            # conflict with rangebreaks + explicit range constraints that causes traces to vanish,
+            # while go.Figure handles both without issue (same architecture as Chart 2)
+            _px_fig1 = px.line(plot_df, x="Date", y="Display KPI", color="Model Name", markers=True, height=calculated_height - 10, custom_data=["Model Name", "KPI", "Overlapping Models", "Overlap Count"])
+            fig_models = go.Figure(data=_px_fig1.data)
             fig_models.update_traces(
                 hovertemplate="<b>🎯 Model:</b> %{customdata[0]}<br><b>📅 Date:</b> %{x}<br><b>📈 KPI:</b> %{customdata[1]:.4f}<br>───────────────────────<br><b>👥 All at this point (%{customdata[3]}):</b><br>%{customdata[2]}<extra></extra>",
                 hoverlabel_namelength=-1, line=dict(width=2.5), marker=dict(size=7, line=dict(width=1, color="white"))
             )
             fig_models.update_layout(
+                height=calculated_height - 10,
                 xaxis_title="<b>Date</b>", yaxis_title="<b>KPI</b>", legend_title="Active Models", margin=dict(l=85, r=20, t=50, b=110), hovermode="closest", font=dict(size=13),
                 xaxis_title_font=dict(size=20, family="Arial-Bold, Arial"), yaxis_title_font=dict(size=20, family="Arial-Bold, Arial"), hoverlabel=dict(font_size=16, font_family="Arial", align="left", namelength=-1)
             )
@@ -358,9 +364,8 @@ with chart_col:
             apply_legend(fig_models, st.session_state.legend_mode, inside=True)
             _tick_kwargs1 = dict(tickmode="auto", nticks=20) if st.session_state.time_view == "All Time" else dict(tickmode="linear", dtick=86400000)
 
-            # rangebreaks collapses Saturday–Sunday from the axis entirely, so ticks jump
-            # directly from Friday to Monday with no gap or phantom weekend columns,
-            # consistent with Chart 3 (Raw KPI) which uses the same mechanism successfully
+            # rangebreaks collapses Saturday–Sunday from the axis; go.Figure resolves
+            # the rendering conflict that caused traces to vanish when applied to a px-native figure
             fig_models.update_xaxes(
                 type="date", tickformat="%b %d", tickangle=-40, automargin=True,
                 range=[x_start, x_end], rangeslider_visible=False,
