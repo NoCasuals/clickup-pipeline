@@ -356,19 +356,15 @@ with chart_col:
             )
 
             apply_legend(fig_models, st.session_state.legend_mode, inside=True)
+            _tick_kwargs1 = dict(tickmode="auto", nticks=20) if st.session_state.time_view == "All Time" else dict(tickmode="linear", dtick=86400000)
 
-            # Suppress weekend tick marks by computing explicit business-day tick positions;
-            # rangebreaks is intentionally avoided here as it conflicts with px.line's internal
-            # trace rendering when combined with an explicit range constraint, causing traces to vanish
-            _weekday_ticks1 = pd.bdate_range(start=x_start, end=x_end)
-            _tick_kwargs1 = (
-                dict(tickmode="auto", nticks=20)
-                if st.session_state.time_view == "All Time"
-                else dict(tickvals=list(_weekday_ticks1), ticktext=[pd.Timestamp(d).strftime("%b %d") for d in _weekday_ticks1])
-            )
+            # rangebreaks collapses Saturday–Sunday from the axis entirely, so ticks jump
+            # directly from Friday to Monday with no gap or phantom weekend columns,
+            # consistent with Chart 3 (Raw KPI) which uses the same mechanism successfully
             fig_models.update_xaxes(
                 type="date", tickformat="%b %d", tickangle=-40, automargin=True,
                 range=[x_start, x_end], rangeslider_visible=False,
+                rangebreaks=[dict(bounds=["sat", "mon"])],
                 **_tick_kwargs1
             )
             fig_models.update_yaxes(automargin=True, type="log" if _yscale_resolved == "Log" else "linear", rangemode="tozero" if _yscale_resolved == "From Zero" else "normal", zeroline=False)
