@@ -613,12 +613,18 @@ def main():
                     rows_to_insert_at_top = []   
 
                     for p_update in project_sheet_updates:
-                        full_name = p_update["model_name"]
-                        lq_val = str(p_update["loading_quotient"])
+                        full_name        = p_update["model_name"]
+                        lq_val           = str(p_update["loading_quotient"])
                         clickup_start_dt = clean_and_parse_date(p_update.get("clickup_start_date", ""))
                         clickup_due_dt   = clean_and_parse_date(p_update.get("clickup_due_date", ""))
 
-                        for (nm, dt), (row_num, current_kpi) in list(existing_index.items()):
+                        # Scan for existing rows that share this model name and update
+                        # their KPI when the value has changed. Only unpack entries that
+                        # are confirmed 2-tuples to guard against corrupt index entries.
+                        for (nm, dt), index_val in list(existing_index.items()):
+                            if not isinstance(index_val, tuple) or len(index_val) < 2:
+                                continue
+                            row_num, current_kpi = index_val
                             if nm == full_name.upper():
                                 if current_kpi != lq_val:
                                     pending_updates.append((row_num, lq_val))
