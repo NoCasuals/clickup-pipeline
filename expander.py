@@ -30,7 +30,7 @@ def get_google_credentials():
 
 def execute_with_retry(func, *args, **kwargs):
     """
-    Executes a Google API method using exponential backoff to mitigate 
+    Executes a Google API method using exponential backoff to mitigate
     rate limit containment rules (HTTP 429).
     """
     max_retries = 5
@@ -47,6 +47,27 @@ def execute_with_retry(func, *args, **kwargs):
                 raise e
         except Exception as e:
             raise e
+
+def batch_delete_rows(sheet, row_nums):
+    """Deletes multiple rows from a worksheet in a single batchUpdate API request.
+    row_nums is a list/set of 1-based row numbers. Rows are deleted descending
+    so earlier deletions don't shift the indices of later ones."""
+    if not row_nums:
+        return
+    requests = [
+        {
+            "deleteDimension": {
+                "range": {
+                    "sheetId": sheet.id,
+                    "dimension": "ROWS",
+                    "startIndex": rn - 1,
+                    "endIndex": rn
+                }
+            }
+        }
+        for rn in sorted(row_nums, reverse=True)
+    ]
+    execute_with_retry(sheet.spreadsheet.batch_update, {"requests": requests})
 
 def load_difficulty_tiers(client, url):
     """
@@ -118,15 +139,16 @@ def list_spreadsheets_in_folder(folder_id, service):
 
 def parse_number_sequence(seg):
     """
-    Parses and expands numeric sequences and range expressions (e.g., '1 TO 5', '12-18').
+    Parses and expands numeric sequences and range expressions (e.g., '1 TO 5', '1, TO 5', '12-18').
+    The optional comma before TO handles patterns like '(1, to 4, 6 to 8)'.
     """
     seg = seg.upper()
     numbers = set()
-    ranges = re.findall(r'(\d+)\s*(?:TO|-)\s*(\d+)', seg)
+    ranges = re.findall(r'(\d+)\s*,?\s*(?:TO|-)\s*(\d+)', seg)
     for start, end in ranges:
         for i in range(int(start), int(end) + 1):
             numbers.add(i)
-        seg = re.sub(rf'{start}\s*(?:TO|-)\s*{end}', '', seg)
+        seg = re.sub(rf'{start}\s*,?\s*(?:TO|-)\s*{end}', '', seg)
     extra_nums = re.findall(r'\d+', seg)
     for n in extra_nums:
         numbers.add(int(n))
@@ -274,6 +296,15 @@ def extract_allowed_targets(task_name):
         for i in range(int(p23.group(2)), int(p23.group(3)) + 1):
             add_model_target(series, str(i))
 
+    # General parenthesized handler: catches multi-range groups like "BBs (1, to 4, 6 to 8)"
+    # that p23 (single-range only) cannot handle. Harmlessly overlaps with p23 matches since
+    # add_model_target writes to a set.
+    for paren_m in re.finditer(r'\b([A-Z-]{1,4})\s*\(\s*([^)]+)\s*\)', text_no_blocks):
+        series = paren_m.group(1)
+        nums = parse_number_sequence(paren_m.group(2))
+        for num in nums:
+            add_model_target(series, str(num))
+
     p1 = re.search(r'\b([A-Z-]{1,4})\s*(\d+(?:\s*,\s*\d+)+)', text_no_blocks)
     if p1:
         series = p1.group(1)
@@ -375,6 +406,112 @@ def clean_and_parse_date(date_str):
             return None
     return None
 
+def load_and_parse_schedule(file_id, drive_service):
+    """Downloads a schedule workbook and returns (schedule_data, arch_idx, floor_idx, truss_idx)."""
+    file_bytes = drive_service.files().get_media(fileId=file_id).execute()
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    ws = wb.worksheets[0]
+    for merged_range in list(ws.merged_cells.ranges):
+        min_row, max_row = merged_range.min_row, merged_range.max_row
+        min_col, max_col = merged_range.min_col, merged_range.max_col
+        top_left_value = ws.cell(row=min_row, column=min_col).value
+        ws.unmerge_cells(start_row=min_row, start_column=min_col, end_row=max_row, end_column=max_col)
+        for r in range(min_row, max_row + 1):
+            for c in range(min_col, max_col + 1):
+                ws.cell(row=r, column=c).value = top_left_value
+    schedule_data = []
+    for sheet_row in ws.iter_rows(values_only=True):
+        clean_row = [str(cell).strip() if cell is not None else "" for cell in sheet_row]
+        schedule_data.append(clean_row)
+    arch_idx, floor_idx, truss_idx = find_date_column_indices(schedule_data)
+    return schedule_data, arch_idx, floor_idx, truss_idx
+
+def compute_matched_model_names(task_name, schedule_data):
+    """
+    Returns the set of model output names (uppercase) that a parent task row matches
+    against the given schedule data. Used during pre-scan conflict resolution.
+    """
+    project_code, allowed_models, allowed_blocks, allowed_lots = extract_allowed_targets(task_name)
+    if not project_code:
+        return set()
+    matched = set()
+    for s_row_idx, s_row in enumerate(schedule_data):
+        if len(s_row) < 5 or s_row_idx == 1:
+            continue
+        model_cell = s_row[2].strip().replace(".0", "")
+        normalized_model_check = re.sub(r'[^A-Z]', '', model_cell.upper())
+        if normalized_model_check in ("MODEL", "MODELNAME", "SERIES", "DESCRIPTION") or not model_cell:
+            continue
+        model_upper = model_cell.upper()
+        norm_model_cell = re.sub(r'[^A-Z0-9]', '', model_upper)
+        is_match = False
+        matched_via_elevation_suffix = False
+        matched_am_token = ""
+        for am in allowed_models:
+            am_upper = am.upper()
+            match_suff = re.search(r'^(.+?)(([A-Z])+)$', am_upper)
+            if match_suff:
+                base_am = match_suff.group(1)
+                suff_str = match_suff.group(2)
+                if norm_model_cell == re.sub(r'[^A-Z0-9]', '', base_am):
+                    elev_cell = s_row[3].upper() if len(s_row) > 3 else ""
+                    if all(c in elev_cell for c in suff_str):
+                        is_match = True
+                        matched_via_elevation_suffix = True
+                        matched_am_token = am
+                        break
+            if norm_model_cell == re.sub(r'[^A-Z0-9]', '', am_upper):
+                is_match = True
+                break
+            if is_wildcard_numeric_match(am_upper, norm_model_cell):
+                is_match = True
+                break
+        if not is_match:
+            for ab in allowed_blocks:
+                if ab in model_upper or re.sub(r'[^A-Z0-9]', '', ab) in norm_model_cell:
+                    is_match = True
+                    break
+        if not is_match:
+            for al_num in allowed_lots:
+                if f"LOT {al_num}" in model_upper or f"LOT0{al_num}" in model_upper or f"LOT {al_num})" in model_upper:
+                    is_match = True
+                    break
+        if is_match:
+            model_output = matched_am_token if matched_via_elevation_suffix else model_cell
+            matched.add(model_output.upper())
+    return matched
+
+def delete_model_history_from_sheets(model_full_name, proj_sheet, flat_sheet):
+    """
+    Purges all Sheet 2 and Sheet 3 rows for a model that has been reassigned to a
+    different parent task or removed from a parent task's scope.
+    """
+    model_upper = model_full_name.strip().upper()
+    print(f"     [x] Purging historical entries for: {model_full_name}")
+    for sheet, label in [(flat_sheet, "Sheet 3"), (proj_sheet, "Sheet 2")]:
+        rows = sheet.get_all_values()
+        to_delete = [i + 1 for i, r in enumerate(rows) if r and r[0].strip().upper() == model_upper]
+        if to_delete:
+            print(f"       -> Removing {len(to_delete)} rows from {label}")
+            for row_num in sorted(to_delete, reverse=True):
+                execute_with_retry(sheet.delete_rows, row_num)
+
+def batch_purge_models_from_sheets(model_names, proj_sheet, flat_sheet):
+    """
+    Purges Sheet 2 and Sheet 3 rows for a collection of models in exactly two reads
+    and two writes (one per sheet), regardless of how many models need purging.
+    """
+    if not model_names:
+        return
+    model_uppers = {m.strip().upper() for m in model_names}
+    print(f"     [x] Batch purging {len(model_uppers)} model(s) from Sheet 2/3...")
+    for sheet, label in [(flat_sheet, "Sheet 3"), (proj_sheet, "Sheet 2")]:
+        rows = sheet.get_all_values()
+        to_delete = [i + 1 for i, r in enumerate(rows) if r and r[0].strip().upper() in model_uppers]
+        if to_delete:
+            print(f"       -> Removing {len(to_delete)} rows from {label}")
+            batch_delete_rows(sheet, to_delete)
+
 def main():
     print(f"[{datetime.now()}] Initializing Advanced Inline Upsert Engine...")
     creds = get_google_credentials()
@@ -399,8 +536,7 @@ def main():
         
         if sheet1_purge_indices:
             print(f" [!] Purging {len(sheet1_purge_indices)} incorrect structural rows from Sheet 1...")
-            for row_num in sorted(sheet1_purge_indices, reverse=True):
-                execute_with_retry(log_sheet.delete_rows, row_num)
+            batch_delete_rows(log_sheet, sheet1_purge_indices)
             all_log_rows = log_sheet.get_all_values()
 
         # --- AUTOMATED DATA PURGE PROTOCOL (SHEET 2 - WEIGHTED) ---
@@ -416,8 +552,7 @@ def main():
                     
         if sheet2_purge_indices:
             print(f" [!] Purging {len(sheet2_purge_indices)} corrupt historical series items from Sheet 2...")
-            for row_num in sorted(sheet2_purge_indices, reverse=True):
-                execute_with_retry(proj_sheet.delete_rows, row_num)
+            batch_delete_rows(proj_sheet, sheet2_purge_indices)
             proj_rows = proj_sheet.get_all_values()
 
         # --- UPDATED: AUTOMATED DATA PURGE PROTOCOL (SHEET 3 - UNWEIGHTED FLAT) ---
@@ -433,9 +568,80 @@ def main():
                     
         if sheet3_purge_indices:
             print(f" [!] Purging {len(sheet3_purge_indices)} corrupt historical series items from Sheet 3...")
-            for row_num in sorted(sheet3_purge_indices, reverse=True):
-                execute_with_retry(flat_sheet.delete_rows, row_num)
+            batch_delete_rows(flat_sheet, sheet3_purge_indices)
             flat_rows = flat_sheet.get_all_values()
+
+        # --- PRE-SCAN: RESOLVE MODEL OWNERSHIP FOR SHARED PROJECT CODES ---
+        print(" -> Pre-scanning for shared project codes across parent tasks...")
+        project_code_rows = {}  # project_code -> list of [row_idx, clickup_start_str, file_id, row]
+        for _idx, _row in enumerate(all_log_rows):
+            if _idx == 0 or len(_row) < 2 or not _row[1].strip():
+                continue
+            _pc, _, _, _ = extract_allowed_targets(_row[1])
+            if not _pc:
+                continue
+            _fid = next((fid for fname, fid in drive_files.items() if _pc in fname), None)
+            if not _fid:
+                continue
+            _start = _row[10].strip() if len(_row) > 10 else ""
+            project_code_rows.setdefault(_pc, []).append([_idx, _start, _fid, _row])
+
+        schedule_data_cache = {}   # file_id -> (schedule_data, arch_idx, floor_idx, truss_idx)
+        model_blacklists = {}      # row_idx -> set of uppercase full model names to skip
+        pre_purge_models = set()   # full model names needing Sheet 2/3 cleanup before re-assignment
+
+        conflicted_projects = {pc for pc, entries in project_code_rows.items() if len(entries) > 1}
+        if conflicted_projects:
+            print(f" -> Found {len(conflicted_projects)} project code(s) with multiple parent tasks. Resolving model ownership...")
+            for _pc in conflicted_projects:
+                _entries = project_code_rows[_pc]
+                _entries.sort(key=lambda e: (clean_and_parse_date(e[1]) or datetime.min.date()), reverse=True)
+                _fid = _entries[0][2]
+                if _fid not in schedule_data_cache:
+                    try:
+                        schedule_data_cache[_fid] = load_and_parse_schedule(_fid, drive_service)
+                    except Exception as _e:
+                        print(f"     [!] Could not load schedule for {_pc}: {_e}")
+                        continue
+                _sched, _, _, _ = schedule_data_cache[_fid]
+                _claimed_globally = set()
+                for _entry in _entries:
+                    _row_idx, _, _, _row_data = _entry
+                    _this_models = {f"{_pc} - {m}".upper() for m in compute_matched_model_names(_row_data[1], _sched)}
+                    _contested = _this_models & _claimed_globally
+                    if _contested:
+                        model_blacklists.setdefault(_row_idx, set()).update(_contested)
+                        pre_purge_models.update(_contested)
+                    _claimed_globally.update(_this_models - _contested)
+
+        if pre_purge_models:
+            print(f" -> Purging {len(pre_purge_models)} contested model(s) from Sheet 2/3 before re-assignment...")
+            batch_purge_models_from_sheets(pre_purge_models, proj_sheet, flat_sheet)
+            # Refresh after row deletions so indices start accurate
+            proj_rows = proj_sheet.get_all_values()
+            flat_rows = flat_sheet.get_all_values()
+
+        # Build Sheet 2/3 in-memory indices once. Maintained across all iterations to
+        # avoid a get_all_values() call per parent task (the main source of 429 read errors).
+        existing_index = {}
+        for r_idx, r_cells in enumerate(proj_rows):
+            if r_idx == 0: continue
+            nm = r_cells[0].strip().upper() if len(r_cells) > 0 else ""
+            dt = r_cells[1].strip() if len(r_cells) > 1 else ""
+            kp = r_cells[2].strip() if len(r_cells) > 2 else ""
+            if nm and dt: existing_index[(nm, dt)] = (r_idx + 1, kp)
+
+        flat_existing_index = {}
+        for r_idx, r_cells in enumerate(flat_rows):
+            if r_idx == 0: continue
+            nm = r_cells[0].strip().upper() if len(r_cells) > 0 else ""
+            dt = r_cells[1].strip() if len(r_cells) > 1 else ""
+            kp = r_cells[2].strip() if len(r_cells) > 2 else ""
+            if nm and dt: flat_existing_index[(nm, dt)] = (r_idx + 1, kp)
+
+        # Dirty flags: set True after row deletions (which shift indices). False = index is current.
+        sheet2_dirty = False
+        sheet3_dirty = False
 
         print("\nScanning rows and executing architectural upsert calculations...")
         for idx in range(len(all_log_rows) - 1, 0, -1):
@@ -458,7 +664,8 @@ def main():
             if not matched_file_id:
                 continue
                 
-            existing_children = {}  
+            # existing_children: cleaned_key -> (sheet1_row_num, original_model_name)
+            existing_children = {}
             scan_idx = idx + 1
             while scan_idx < len(all_log_rows):
                 scan_row = all_log_rows[scan_idx]
@@ -467,29 +674,16 @@ def main():
                 if len(scan_row) > 2 and scan_row[2].strip():
                     raw_model_name = scan_row[2].strip().upper()
                     cleaned_key = re.sub(r'[^A-Z0-9]', '', raw_model_name)
-                    existing_children[cleaned_key] = scan_idx + 1
+                    existing_children[cleaned_key] = (scan_idx + 1, raw_model_name)
                 scan_idx += 1
-                
+
             try:
-                file_bytes = drive_service.files().get_media(fileId=matched_file_id).execute()
-                wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-                ws = wb.worksheets[0]
-                
-                for merged_range in list(ws.merged_cells.ranges):
-                    min_row, max_row = merged_range.min_row, merged_range.max_row
-                    min_col, max_col = merged_range.min_col, merged_range.max_col
-                    top_left_value = ws.cell(row=min_row, column=min_col).value
-                    ws.unmerge_cells(start_row=min_row, start_column=min_col, end_row=max_row, end_column=max_col)
-                    for r in range(min_row, max_row + 1):
-                        for c in range(min_col, max_col + 1):
-                            ws.cell(row=r, column=c).value = top_left_value
-                
-                schedule_data = []
-                for sheet_row in ws.iter_rows(values_only=True):
-                    clean_row = [str(cell).strip() if cell is not None else "" for cell in sheet_row]
-                    schedule_data.append(clean_row)
-                
-                arch_idx, floor_idx, truss_idx = find_date_column_indices(schedule_data)
+                if matched_file_id in schedule_data_cache:
+                    schedule_data, arch_idx, floor_idx, truss_idx = schedule_data_cache[matched_file_id]
+                else:
+                    schedule_data, arch_idx, floor_idx, truss_idx = load_and_parse_schedule(matched_file_id, drive_service)
+                    schedule_data_cache[matched_file_id] = (schedule_data, arch_idx, floor_idx, truss_idx)
+
                 subtask_compiled_matches = []
                 
                 for s_row_idx, s_row in enumerate(schedule_data):
@@ -579,6 +773,24 @@ def main():
                             "final_start_date": ""
                         })
 
+                # --- SCOPE CHANGE DETECTION ---
+                # Find child rows that existed previously but are no longer matched.
+                # Purge their Sheet 1 child rows and their Sheet 2/3 history.
+                new_matched_keys = {re.sub(r'[^A-Z0-9]', '', item['model_output'].upper())
+                                    for item in subtask_compiled_matches}
+                scope_removed_names = []
+                scope_removed_sh1_rows = []
+                for ck, (row_num, orig_name) in existing_children.items():
+                    if ck not in new_matched_keys:
+                        scope_removed_names.append(f"{project_code} - {orig_name}")
+                        scope_removed_sh1_rows.append(row_num)
+
+                if scope_removed_names:
+                    batch_purge_models_from_sheets(scope_removed_names, proj_sheet, flat_sheet)
+                    sheet2_dirty = True
+                    sheet3_dirty = True
+                    batch_delete_rows(log_sheet, scope_removed_sh1_rows)
+
                 valid_model_dates = []
                 for item in subtask_compiled_matches:
                     if not item["is_block"]:
@@ -599,25 +811,46 @@ def main():
                 new_rows_to_insert = []
                 project_sheet_updates = []
                 seen_models_this_pass = set()
-                
+                row_blacklist = model_blacklists.get(idx, set())
+
+                # Remove stale Sheet 1 child rows for models now owned by a later-dated parent.
+                # These were skipped in the scope-change pass (they ARE in the schedule) but
+                # must not remain under this losing parent.
+                if row_blacklist:
+                    blacklisted_sh1_rows = [
+                        row_num for ck, (row_num, orig_name) in existing_children.items()
+                        if f"{project_code} - {orig_name}".upper() in row_blacklist
+                    ]
+                    if blacklisted_sh1_rows:
+                        print(f"     [x] Removing {len(blacklisted_sh1_rows)} blacklisted child row(s) from Sheet 1...")
+                        batch_delete_rows(log_sheet, blacklisted_sh1_rows)
+                        blacklisted_row_set = set(blacklisted_sh1_rows)
+                        existing_children = {ck: v for ck, v in existing_children.items()
+                                             if v[0] not in blacklisted_row_set}
+
                 for item in subtask_compiled_matches:
                     model_output = item["model_output"]
+
+                    # Skip models that belong to a later-dated parent with the same project code
+                    if f"{project_code} - {model_output}".upper() in row_blacklist:
+                        continue
+
                     difficulty_output = item["difficulty_output"]
                     start_date_output = item["final_start_date"]
-                    
+
                     try:
                         parent_col_g = float(row[6].strip()) if len(row) > 6 and row[6].strip() else 0
                         model_difficulty = float(difficulty_output) if difficulty_output else 0
                         loading_quotient = round(model_difficulty / parent_col_g, 4) if parent_col_g != 0 else ""
-                        
+
                         # UPDATED: Computes unweighted loading metric allocation payload (1 / duration)
                         flat_loading_quotient = round(1.0 / parent_col_g, 4) if parent_col_g != 0 else ""
                     except Exception:
                         loading_quotient = ""
                         flat_loading_quotient = ""
-                    
+
                     parent_col_k_str = row[10].strip() if len(row) > 10 else ""
-                    
+
                     if model_output.upper() not in seen_models_this_pass:
                         seen_models_this_pass.add(model_output.upper())
                         project_sheet_updates.append({
@@ -628,10 +861,10 @@ def main():
                             "duration": row[6].strip() if len(row) > 6 else "",
                             "clickup_due_date": row[11].strip() if len(row) > 11 else ""
                         })
-                    
+
                     model_lookup_key = re.sub(r'[^A-Z0-9]', '', model_output.upper())
                     if model_lookup_key in existing_children:
-                        live_row_num = existing_children[model_lookup_key]
+                        live_row_num, _ = existing_children[model_lookup_key]
                         orig_child_row = all_log_rows[live_row_num - 1]
                         
                         current_el = orig_child_row[3].strip() if len(orig_child_row) > 3 else ""
@@ -654,37 +887,35 @@ def main():
                 if new_rows_to_insert:
                     execute_with_retry(log_sheet.insert_rows, new_rows_to_insert, row=idx + 2, value_input_option="USER_ENTERED")
                 
-                # --- UPDATED: DATA ROUTING TRACKING SWEEP FOR SHEET 2 & SHEET 3 ---
+                # --- DATA ROUTING TRACKING SWEEP FOR SHEET 2 & SHEET 3 ---
                 if project_sheet_updates:
-                    proj_sheet = master_workbook.worksheets()[1]
-                    proj_rows = proj_sheet.get_all_values()
-                    
-                    flat_sheet = master_workbook.worksheets()[2]
-                    flat_rows = flat_sheet.get_all_values()
-                    
+                    # Re-read only when rows were deleted (dirty flag). Inserts are handled
+                    # by updating the in-memory index directly, so no re-read is needed for those.
+                    if sheet2_dirty:
+                        proj_rows = proj_sheet.get_all_values()
+                        existing_index = {}
+                        for r_idx, r_cells in enumerate(proj_rows):
+                            if r_idx == 0: continue
+                            nm = r_cells[0].strip().upper() if len(r_cells) > 0 else ""
+                            dt = r_cells[1].strip() if len(r_cells) > 1 else ""
+                            kp = r_cells[2].strip() if len(r_cells) > 2 else ""
+                            if nm and dt: existing_index[(nm, dt)] = (r_idx + 1, kp)
+                        sheet2_dirty = False
+
+                    if sheet3_dirty:
+                        flat_rows = flat_sheet.get_all_values()
+                        flat_existing_index = {}
+                        for r_idx, r_cells in enumerate(flat_rows):
+                            if r_idx == 0: continue
+                            nm = r_cells[0].strip().upper() if len(r_cells) > 0 else ""
+                            dt = r_cells[1].strip() if len(r_cells) > 1 else ""
+                            kp = r_cells[2].strip() if len(r_cells) > 2 else ""
+                            if nm and dt: flat_existing_index[(nm, dt)] = (r_idx + 1, kp)
+                        sheet3_dirty = False
+
                     today_str = datetime.now().strftime("%Y-%m-%d")
-
-                    # Map Sheet 2 current matrix allocations
-                    existing_index = {}
-                    for r_idx, r_cells in enumerate(proj_rows):
-                        if r_idx == 0: continue
-                        nm = r_cells[0].strip().upper() if len(r_cells) > 0 else ""
-                        dt = r_cells[1].strip() if len(r_cells) > 1 else ""
-                        kp = r_cells[2].strip() if len(r_cells) > 2 else ""
-                        if nm and dt: existing_index[(nm, dt)] = (r_idx + 1, kp)
-
-                    # Map Sheet 3 current matrix allocations
-                    flat_existing_index = {}
-                    for r_idx, r_cells in enumerate(flat_rows):
-                        if r_idx == 0: continue
-                        nm = r_cells[0].strip().upper() if len(r_cells) > 0 else ""
-                        dt = r_cells[1].strip() if len(r_cells) > 1 else ""
-                        kp = r_cells[2].strip() if len(r_cells) > 2 else ""
-                        if nm and dt: flat_existing_index[(nm, dt)] = (r_idx + 1, kp)
-
-                    pending_updates = []         
-                    rows_to_insert_at_top = []   
-                    
+                    pending_updates = []
+                    rows_to_insert_at_top = []
                     flat_pending_updates = []
                     flat_rows_to_insert_at_top = []
 
@@ -715,10 +946,12 @@ def main():
                                     flat_pending_updates.append((row_num, flat_lq_val))
                                     flat_existing_index[(nm, dt)] = (row_num, flat_lq_val)
 
-                        dates_to_ensure = {today_str}
+                        dates_to_ensure = set()
                         if clickup_start_dt and clickup_due_dt and clickup_due_dt >= clickup_start_dt:
                             for bd in pd.bdate_range(str(clickup_start_dt), str(clickup_due_dt)):
                                 dates_to_ensure.add(str(bd.date()))
+                        if not dates_to_ensure:
+                            dates_to_ensure.add(today_str)
 
                         for day_str in sorted(dates_to_ensure):
                             key = (full_name.upper(), day_str)
@@ -743,7 +976,18 @@ def main():
                         print(f" [≠] TAB 2 UPDATE: Batched synchronization complete for {len(cells_to_update)} records.")
 
                     if rows_to_insert_at_top:
+                        n2 = len(rows_to_insert_at_top)
                         execute_with_retry(proj_sheet.insert_rows, rows_to_insert_at_top, row=2, value_input_option="USER_ENTERED")
+                        # Shift all stored row numbers by n2 (rows inserted at position 2),
+                        # then register the new entries so the next iteration skips re-reading.
+                        existing_index = {(nm, dt): (rn + n2 if rn > 0 else 0, kp)
+                                          for (nm, dt), (rn, kp) in existing_index.items()}
+                        for i, ins_row in enumerate(rows_to_insert_at_top):
+                            nm = ins_row[0].strip().upper() if ins_row else ""
+                            dt = ins_row[1].strip() if len(ins_row) > 1 else ""
+                            kp = str(ins_row[2]) if len(ins_row) > 2 else ""
+                            if nm and dt:
+                                existing_index[(nm, dt)] = (2 + i, kp)
 
                     # --- EXECUTE SHEET 3 COMMITS (BATCHED SINGLE-CALL API PASS) ---
                     flat_cells_to_update = []
@@ -755,7 +999,16 @@ def main():
                         print(f" [≠] TAB 3 UPDATE: Batched synchronization complete for {len(flat_cells_to_update)} records.")
 
                     if flat_rows_to_insert_at_top:
+                        n3 = len(flat_rows_to_insert_at_top)
                         execute_with_retry(flat_sheet.insert_rows, flat_rows_to_insert_at_top, row=2, value_input_option="USER_ENTERED")
+                        flat_existing_index = {(nm, dt): (rn + n3 if rn > 0 else 0, kp)
+                                               for (nm, dt), (rn, kp) in flat_existing_index.items()}
+                        for i, ins_row in enumerate(flat_rows_to_insert_at_top):
+                            nm = ins_row[0].strip().upper() if ins_row else ""
+                            dt = ins_row[1].strip() if len(ins_row) > 1 else ""
+                            kp = str(ins_row[2]) if len(ins_row) > 2 else ""
+                            if nm and dt:
+                                flat_existing_index[(nm, dt)] = (2 + i, kp)
                     
             except Exception as inner_e:
                 print(f"     [!] Error processing row index {idx + 1}: {str(inner_e)}")
